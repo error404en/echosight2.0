@@ -1,0 +1,41 @@
+name: echosight
+description: AI-Powered Assistive Vision System with Real-Time Voice Chatbot
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.2.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  camera: ^0.11.0+2
+  speech_to_text: ^7.0.0
+  flutter_tts: ^4.2.0
+  google_mlkit_text_recognition: ^0.14.0
+  tflite_flutter: ^0.11.0
+  permission_handler: ^11.3.1
+  web_socket_channel: ^3.0.1
+  provider: ^6.1.2
+  image: ^4.3.0
+  shared_preferences: ^2.3.4
+  path_provider: ^2.1.5
+  vibration: ^2.0.0
+  flutter_animate: ^4.5.2
+  google_fonts: ^6.2.1
+  record: ^6.2.0
+  audioplayers: ^6.6.0
+  path: ^1.9.1
+  geolocator: ^14.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/models/
+    - assets/labels/
