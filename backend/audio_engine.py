@@ -32,7 +32,7 @@ async def transcribe_audio(audio_base64: str) -> str:
         # Hit Groq Whisper endpoint
         transcription = await client.audio.transcriptions.create(
             file=file_obj,
-            model="whisper-large-3",
+            model="whisper-large-v3",
             response_format="text",
             language="en"
         )

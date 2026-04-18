@@ -17,6 +17,10 @@ from conversation import get_session, clear_session
 from vision_engine import init_client, analyze_with_gemini, quick_analyze
 from audio_engine import init_audio_engine, transcribe_audio, stream_tts
 from face_engine import init_face_engine, detect_known_faces
+from navigation_engine import (
+    fetch_walking_route, get_active_route, clear_route,
+    build_navigation_context,
+)
 
 # Load environment
 load_dotenv()
@@ -131,6 +135,45 @@ async def add_known_face(request: AddFaceRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ─── Navigation Endpoints ───────────────────────────────────────
+
+class StartNavigationRequest(BaseModel):
+    session_id: str
+    destination: str
+    latitude: float
+    longitude: float
+
+
+@app.post("/api/navigate/start")
+async def start_navigation(request: StartNavigationRequest):
+    """Fetch a walking route and begin guided navigation."""
+    try:
+        route = await fetch_walking_route(
+            origin_lat=request.latitude,
+            origin_lng=request.longitude,
+            destination=request.destination,
+            session_id=request.session_id,
+        )
+        if route is None:
+            raise HTTPException(status_code=404, detail="Could not find a route to that destination.")
+        return {"status": "ok", "route": route.to_dict()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class StopNavigationRequest(BaseModel):
+    session_id: str
+
+
+@app.post("/api/navigate/stop")
+async def stop_navigation(request: StopNavigationRequest):
+    """Stop active navigation for a session."""
+    clear_route(request.session_id)
+    return {"status": "stopped", "session_id": request.session_id}
+
+
 # ─── WebSocket Chat Endpoint ────────────────────────────────────
 
 @app.websocket("/ws/chat")
@@ -167,6 +210,7 @@ async def websocket_chat(websocket: WebSocket):
             audio_b64 = data.get("audio")
             image_b64 = data.get("image")
             vision_context = data.get("vision_context")
+            mode = data.get("mode", "assistant")
 
             # 1. Transcribe Audio if present
             if audio_b64:
@@ -193,8 +237,36 @@ async def websocket_chat(websocket: WebSocket):
             session = get_session(session_id)
             session.add_user_message(query, vision_context)
 
+            # ─── Navigation context injection ───────────────────
+            location_data = data.get("location")
+            active_route = get_active_route(session_id)
+            if active_route and not active_route.is_complete and location_data:
+                nav_ctx = build_navigation_context(
+                    route=active_route,
+                    current_lat=location_data.get("latitude", 0),
+                    current_lng=location_data.get("longitude", 0),
+                    heading=location_data.get("heading", 0),
+                )
+                # Override mode to navigation_active
+                mode = "navigation_active"
+                # Append turn-by-turn data to vision context
+                if not vision_context:
+                    vision_context = {}
+                vision_context["navigation"] = nav_ctx
+
+                # Notify Flutter if arrived
+                if nav_ctx.get("status") == "arrived":
+                    await websocket.send_text("[NAV_ARRIVED]")
+
+            # ─── Surroundings scene memory injection ─────────────
+            scene_memory = data.get("scene_memory", "")
+            if mode in ("surroundings", "sight") and scene_memory:
+                if not vision_context:
+                    vision_context = {}
+                vision_context["scene_memory"] = scene_memory
+
             # Build prompts
-            system_prompt = session.get_system_prompt()
+            system_prompt = session.get_system_prompt(mode)
             history = session.get_history_for_api()
 
             # Stream response from Gemini
@@ -213,9 +285,24 @@ async def websocket_chat(websocket: WebSocket):
             complete_response = "".join(full_response)
             session.add_assistant_message(complete_response)
 
-            # Stream Edge-TTS audio back to Flutter
-            async for audio_chunk in stream_tts(complete_response):
-                await websocket.send_text(f"[AUDIO] {audio_chunk}")
+            # For surroundings mode: send scene memory back to Flutter
+            # and skip TTS if "no changes"
+            is_no_change = (
+                mode in ("surroundings", "sight") and
+                complete_response.strip().lower().replace(".", "") in
+                ["no changes", "no change", "nothing changed"]
+            )
+
+            if is_no_change:
+                await websocket.send_text("[SCENE_UNCHANGED]")
+            else:
+                # Send scene memory update back to Flutter
+                if mode in ("surroundings", "sight"):
+                    await websocket.send_text(f"[SCENE_MEMORY] {complete_response}")
+
+                # Stream Edge-TTS audio back to Flutter
+                async for audio_chunk in stream_tts(complete_response):
+                    await websocket.send_text(f"[AUDIO] {audio_chunk}")
 
             # Signal end of response
             await websocket.send_text("[DONE]")
