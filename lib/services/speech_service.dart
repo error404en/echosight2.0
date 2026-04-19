@@ -35,17 +35,29 @@ class SpeechService extends ChangeNotifier {
   Future<bool> initialize() async {
     try {
       bool recordPerm = await _audioRecorder.hasPermission();
-      bool sttInit = await _speechToText.initialize(
-        onError: (err) => debugPrint('STT Error: \$err'),
-        onStatus: (status) => debugPrint('STT Status: \$status'),
-      );
+      bool sttInit = false;
+      try {
+        sttInit = await _speechToText.initialize(
+          onError: (err) => debugPrint('STT Error: $err'),
+          onStatus: (status) => debugPrint('STT Status: $status'),
+        );
+      } catch (e) {
+        debugPrint('STT Initialize Exception: $e');
+      }
       
-      _isAvailable = recordPerm && sttInit;
+      if (recordPerm && !sttInit) {
+        // Fallback to cloud if local STT fails
+        _inputMode = SpeechInputMode.cloudWhisper;
+        _isAvailable = true;
+      } else {
+        _isAvailable = recordPerm && sttInit;
+      }
+
       notifyListeners();
-      debugPrint('🎤 Microphone & STT ready: \$_isAvailable');
+      debugPrint('🎤 Microphone & STT ready: $_isAvailable (Local STT: $sttInit)');
       return _isAvailable;
     } catch (e) {
-      debugPrint('❌ Mic init failed: \$e');
+      debugPrint('❌ Mic init failed: $e');
       _isAvailable = false;
       notifyListeners();
       return false;
@@ -96,7 +108,7 @@ class SpeechService extends ChangeNotifier {
       } else {
         // Cloud Whisper mode
         final dir = await getTemporaryDirectory();
-        final path = '\${dir.path}/speech_input.m4a';
+        final path = '${dir.path}/speech_input.wav';
         
         final file = File(path);
         if (await file.exists()) {
@@ -105,16 +117,16 @@ class SpeechService extends ChangeNotifier {
 
         await _audioRecorder.start(
           const RecordConfig(
-            encoder: AudioEncoder.aacLc,
+            encoder: AudioEncoder.wav,
             bitRate: 128000,
             sampleRate: 16000,
           ),
           path: path,
         );
-        debugPrint('🎤 Recording started to \$path');
+        debugPrint('🎤 Recording started to $path');
       }
     } catch (e) {
-      debugPrint('❌ Start listening failed: \$e');
+      debugPrint('❌ Start listening failed: $e');
       _isListening = false;
       notifyListeners();
     }
@@ -152,7 +164,7 @@ class SpeechService extends ChangeNotifier {
         }
       }
     } catch (e) {
-      debugPrint('❌ Stop listening failed: \$e');
+      debugPrint('❌ Stop listening failed: $e');
       _isListening = false;
       notifyListeners();
     }

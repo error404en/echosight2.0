@@ -7,6 +7,7 @@ import '../services/fusion_engine.dart';
 import '../services/camera_service.dart';
 import '../services/tts_service.dart';
 import '../services/websocket_service.dart';
+import '../services/surroundings_service.dart';
 
 /// Settings screen for configuring the app.
 class SettingsScreen extends StatefulWidget {
@@ -87,9 +88,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           onPressed: () {
                             final url = _serverUrlController.text.trim();
                             if (url.isNotEmpty) {
-                              ws.setServerUrl(url);
+                              ws.saveServerUrl(url); // Also triggers reconnect
+                            } else {
+                              ws.retryConnection();
                             }
-                            ws.retryConnection();
 
                             ScaffoldMessenger.of(context).showSnackBar(
                               SnackBar(
@@ -215,6 +217,78 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           const SizedBox(height: 24),
 
+          // ── Surroundings stream (digital retina) ──
+          _SectionHeader(title: 'Surroundings stream', icon: Icons.panorama_wide_angle_select),
+          _buildCard([
+            Consumer<SurroundingsService>(
+              builder: (context, s, _) => Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Verbosity',
+                      style: TextStyle(
+                        color: EchoSightTheme.textSecondary,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      s.verbosity.description,
+                      style: TextStyle(
+                        color: EchoSightTheme.textSecondary.withOpacity(0.75),
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    SegmentedButton<SurroundingsVerbosity>(
+                      segments: const [
+                        ButtonSegment(
+                          value: SurroundingsVerbosity.minimal,
+                          label: Text('Minimal'),
+                          tooltip: 'Safety only — radar style',
+                        ),
+                        ButtonSegment(
+                          value: SurroundingsVerbosity.standard,
+                          label: Text('Standard'),
+                        ),
+                        ButtonSegment(
+                          value: SurroundingsVerbosity.immersive,
+                          label: Text('Immersive'),
+                        ),
+                      ],
+                      selected: {s.verbosity},
+                      onSelectionChanged: (next) {
+                        if (next.isEmpty) return;
+                        s.setVerbosity(next.first, speakFeedback: false);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('${next.first.label}: ${next.first.description}'),
+                            backgroundColor: EchoSightTheme.primary,
+                            duration: const Duration(seconds: 2),
+                            behavior: SnackBarBehavior.floating,
+                          ),
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Scan every ${s.verbosity.scanIntervalSeconds} seconds when Surroundings or Sight mode is on.',
+                      style: TextStyle(
+                        color: EchoSightTheme.textSecondary.withOpacity(0.55),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ]),
+
+          const SizedBox(height: 24),
+
           // ── Display Section ──
           _SectionHeader(title: 'Display', icon: Icons.visibility),
           _buildCard([
@@ -277,7 +351,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const Divider(height: 1, color: Colors.white10),
             _SettingsTile(
               title: 'AI Model',
-              subtitle: 'Gemini 3.1 Pro (Google)',
+              subtitle: 'Groq + Llama 4 Scout Vision',
             ),
             const Divider(height: 1, color: Colors.white10),
             _SettingsTile(

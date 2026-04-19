@@ -39,7 +39,7 @@ class ConversationManager:
         self._trim()
 
     def get_history_for_api(self) -> list[dict]:
-        """Return conversation history formatted for Gemini API."""
+        """Return conversation history formatted for the Groq chat API."""
         history = []
         for msg in self.messages:
             entry = {"role": msg.role, "parts": [{"text": msg.content}]}
@@ -183,6 +183,23 @@ Your core behaviors:
 
         if ctx.get("environment"):
             parts.append(f"Environment: {ctx['environment']}")
+        if ctx.get("scene_memory"):
+            parts.append(f"Previous scene description: \"{ctx['scene_memory']}\"")
+        if ctx.get("navigation"):
+            nav = ctx["navigation"]
+            nav_parts = []
+            if nav.get("status"):
+                nav_parts.append(f"status {nav['status']}")
+            if nav.get("current_step") and nav.get("total_steps"):
+                nav_parts.append(f"step {nav['current_step']} of {nav['total_steps']}")
+            if nav.get("instruction"):
+                nav_parts.append(f"instruction: {nav['instruction']}")
+            if nav.get("distance_remaining"):
+                nav_parts.append(f"distance remaining: {nav['distance_remaining']}")
+            if nav.get("direction_to_waypoint"):
+                nav_parts.append(f"direction: {nav['direction_to_waypoint']}")
+            if nav_parts:
+                parts.append("Navigation: " + "; ".join(nav_parts))
 
         return "; ".join(parts) if parts else "No visual information available"
 

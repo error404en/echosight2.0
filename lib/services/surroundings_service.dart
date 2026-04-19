@@ -43,11 +43,11 @@ extension SurroundingsVerbosityX on SurroundingsVerbosity {
   int get scanIntervalSeconds {
     switch (this) {
       case SurroundingsVerbosity.minimal:
-        return 3;
+        return 15;
       case SurroundingsVerbosity.standard:
-        return 5;
+        return 20;
       case SurroundingsVerbosity.immersive:
-        return 7;
+        return 30;
     }
   }
 }
@@ -56,7 +56,7 @@ extension SurroundingsVerbosityX on SurroundingsVerbosity {
 /// awareness — functioning as a digital eye replacement.
 ///
 /// Unlike other modes where the user must ask, this mode continuously
-/// captures camera frames and sends them to Gemini with a delta-aware
+/// captures camera frames and sends them to the Groq vision backend with a delta-aware
 /// prompt, speaking only about what has CHANGED since the last scan.
 const _kSurroundingsVerbosityKey = 'surroundings_verbosity';
 
@@ -76,7 +76,7 @@ class SurroundingsService extends ChangeNotifier {
   Timer? _scanTimer;
   int _scanCount = 0;
 
-  // Scene memory — what Gemini last described, sent back with next frame
+  // Scene memory ? what the vision model last described, sent back with next frame
   // so it only reports deltas
   String _lastSceneDescription = '';
   List<String> _lastDetectedObjects = [];
@@ -220,6 +220,13 @@ class SurroundingsService extends ChangeNotifier {
   void _startScanLoop() {
     _scanTimer?.cancel();
     final interval = Duration(seconds: _verbosity.scanIntervalSeconds);
+    // First scan shortly after activation; then repeat on interval.
+    // Delay slightly so activation TTS can finish (proactive scan also skips while TTS is speaking).
+    Timer(const Duration(milliseconds: 2200), () {
+      if (_isActive && !_isPaused) {
+        _onScanTick?.call();
+      }
+    });
     _scanTimer = Timer.periodic(interval, (_) {
       if (_isActive && !_isPaused) {
         _onScanTick?.call();
@@ -278,7 +285,7 @@ class SurroundingsService extends ChangeNotifier {
     };
   }
 
-  /// Build the delta-aware query that tells Gemini what was already described.
+  /// Build the delta-aware query that tells the vision model what was already described.
   String _buildDeltaQuery({String mode = 'surroundings'}) {
     final buf = StringBuffer();
     final label = mode == 'sight' ? 'SIGHT SCAN' : 'SURROUNDINGS SCAN';
@@ -297,7 +304,7 @@ class SurroundingsService extends ChangeNotifier {
     return buf.toString();
   }
 
-  /// Called by FusionEngine when Gemini responds to a surroundings scan.
+  /// Called by FusionEngine when the backend responds to a surroundings scan.
   void updateSceneMemory(String newDescription) {
     if (newDescription.isNotEmpty &&
         !newDescription.toLowerCase().contains('no changes')) {

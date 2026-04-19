@@ -241,7 +241,7 @@ class EmergencyService extends ChangeNotifier {
   void _startContinuousScan() {
     _scanTimer?.cancel();
     _scanTimer = Timer.periodic(
-      const Duration(seconds: 8),
+      const Duration(seconds: 12),
       (_) {
         if (_state != EmergencyState.inactive) {
           // Session ID will be injected by FusionEngine

@@ -12,6 +12,7 @@ import '../services/camera_service.dart';
 import '../services/speech_service.dart';
 import '../services/emergency_service.dart';
 import '../services/navigation_service.dart';
+import '../services/surroundings_service.dart';
 import '../models/assistant_mode.dart';
 import 'chat_screen.dart';
 import 'settings_screen.dart';
@@ -68,6 +69,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
               // Dark gradient overlay
               _buildGradientOverlay(),
+
+              // Global Mic area for visually impaired
+              GestureDetector(
+                onTap: () => _handleMicTap(fusion),
+                onLongPress: () {
+                  HapticFeedback.heavyImpact();
+                  fusion.toggleContinuousMode();
+                },
+                behavior: HitTestBehavior.translucent,
+                child: const SizedBox.expand(),
+              ),
 
               // Top status area
               Positioned(
@@ -201,6 +213,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildBottomControls(BuildContext context, FusionEngine fusion) {
+    final bottomSheetWidth = MediaQuery.sizeOf(context).width;
     return Positioned(
       bottom: 0,
       left: 0,
@@ -237,6 +250,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       onSelected: (selected) {
                         if (selected) {
                           HapticFeedback.selectionClick();
+                          if (mode == AssistantMode.navigate) {
+                            Navigator.push(context, MaterialPageRoute(builder: (_) => const NavigationScreen()));
+                            return;
+                          }
+                          if (mode == AssistantMode.emergency) {
+                            final emergency = context.read<EmergencyService>();
+                            emergency.activate();
+                            Navigator.push(context, MaterialPageRoute(builder: (_) => const EmergencyScreen()));
+                            return;
+                          }
                           fusion.setMode(mode);
                         }
                       },
@@ -299,71 +322,100 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               ),
             ),
 
+            Consumer<SurroundingsService>(
+              builder: (context, surroundings, _) {
+                if (!surroundings.isActive) return const SizedBox.shrink();
+                final paused = surroundings.isPaused;
+                final label = paused
+                    ? 'Stream paused — say resume'
+                    : '${surroundings.verbosity.label} • scan every ${surroundings.verbosity.scanIntervalSeconds}s';
+                return Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    label,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: (paused ? Colors.amberAccent : Colors.cyanAccent).withOpacity(0.9),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                );
+              },
+            ),
+
             const SizedBox(height: 8),
 
-            // Quick action buttons — Row 1
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                _QuickActionButton(
-                  icon: Icons.cameraswitch_outlined,
-                  label: 'Flip',
-                  onTap: () {
-                    HapticFeedback.lightImpact();
-                    context.read<CameraService>().switchCamera();
-                  },
+            // Quick action buttons — scroll horizontally on narrow widths (avoids Row overflow).
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minWidth: bottomSheetWidth),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    _QuickActionButton(
+                      icon: Icons.cameraswitch_outlined,
+                      label: 'Flip',
+                      onTap: () {
+                        HapticFeedback.lightImpact();
+                        context.read<CameraService>().switchCamera();
+                      },
+                    ),
+                    const SizedBox(width: 16),
+                    _QuickActionButton(
+                      icon: fusion.speechService.inputMode == SpeechInputMode.onDevice
+                          ? Icons.smartphone
+                          : Icons.cloud,
+                      label: fusion.speechService.inputMode == SpeechInputMode.onDevice
+                          ? 'Local STT'
+                          : 'Cloud STT',
+                      onTap: () {
+                        HapticFeedback.lightImpact();
+                        fusion.speechService.toggleInputMode();
+                      },
+                    ),
+                    const SizedBox(width: 16),
+                    _QuickActionButton(
+                      icon: Icons.navigation,
+                      label: 'Navigate',
+                      color: Colors.greenAccent,
+                      onTap: () {
+                        HapticFeedback.mediumImpact();
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => const NavigationScreen()),
+                        );
+                      },
+                    ),
+                    const SizedBox(width: 16),
+                    _QuickActionButton(
+                      icon: Icons.emergency,
+                      label: 'SOS',
+                      color: Colors.redAccent,
+                      onTap: () {
+                        HapticFeedback.heavyImpact();
+                        final emergency = context.read<EmergencyService>();
+                        emergency.activate();
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => const EmergencyScreen()),
+                        );
+                      },
+                    ),
+                    const SizedBox(width: 16),
+                    _QuickActionButton(
+                      icon: Icons.refresh,
+                      label: 'Clear',
+                      onTap: () {
+                        HapticFeedback.lightImpact();
+                        fusion.clearConversation();
+                      },
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 16),
-                _QuickActionButton(
-                  icon: fusion.speechService.inputMode == SpeechInputMode.onDevice
-                      ? Icons.smartphone
-                      : Icons.cloud,
-                  label: fusion.speechService.inputMode == SpeechInputMode.onDevice
-                      ? 'Local STT'
-                      : 'Cloud STT',
-                  onTap: () {
-                    HapticFeedback.lightImpact();
-                    fusion.speechService.toggleInputMode();
-                  },
-                ),
-                const SizedBox(width: 16),
-                _QuickActionButton(
-                  icon: Icons.navigation,
-                  label: 'Navigate',
-                  color: Colors.greenAccent,
-                  onTap: () {
-                    HapticFeedback.mediumImpact();
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(builder: (_) => const NavigationScreen()),
-                    );
-                  },
-                ),
-                const SizedBox(width: 16),
-                _QuickActionButton(
-                  icon: Icons.emergency,
-                  label: 'SOS',
-                  color: Colors.redAccent,
-                  onTap: () {
-                    HapticFeedback.heavyImpact();
-                    final emergency = context.read<EmergencyService>();
-                    emergency.activate();
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(builder: (_) => const EmergencyScreen()),
-                    );
-                  },
-                ),
-                const SizedBox(width: 16),
-                _QuickActionButton(
-                  icon: Icons.refresh,
-                  label: 'Clear',
-                  onTap: () {
-                    HapticFeedback.lightImpact();
-                    fusion.clearConversation();
-                  },
-                ),
-              ],
+              ),
             ),
           ],
         ),

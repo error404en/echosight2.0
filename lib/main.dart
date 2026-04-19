@@ -15,6 +15,7 @@ import 'services/websocket_service.dart';
 import 'services/location_service.dart';
 import 'services/navigation_service.dart';
 import 'services/emergency_service.dart';
+import 'services/surroundings_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -63,6 +64,26 @@ class EchoSightApp extends StatelessWidget {
         ChangeNotifierProvider(create: (_) => WebSocketService()),
         ChangeNotifierProvider(create: (_) => LocationService()),
 
+        // Proactive surroundings / sight — delta scans + scene memory
+        ChangeNotifierProxyProvider6<
+            CameraService,
+            DetectionService,
+            OcrService,
+            WebSocketService,
+            TtsService,
+            LocationService,
+            SurroundingsService>(
+          create: (context) => SurroundingsService(
+            cameraService: context.read<CameraService>(),
+            detectionService: context.read<DetectionService>(),
+            ocrService: context.read<OcrService>(),
+            webSocketService: context.read<WebSocketService>(),
+            ttsService: context.read<TtsService>(),
+            locationService: context.read<LocationService>(),
+          ),
+          update: (_, a, b, c, d, e, f, previous) => previous!,
+        ),
+
         // Fusion engine — depends on all services
         ChangeNotifierProxyProvider6<
             CameraService,
@@ -79,6 +100,7 @@ class EchoSightApp extends StatelessWidget {
             webSocketService: context.read<WebSocketService>(),
             speechService: context.read<SpeechService>(),
             ttsService: context.read<TtsService>(),
+            surroundingsService: context.read<SurroundingsService>(),
           ),
           update: (_, camera, detection, ocr, ws, speech, tts, previous) =>
               previous!,

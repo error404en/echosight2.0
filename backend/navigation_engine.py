@@ -2,13 +2,12 @@
 EchoSight Backend — Navigation Engine
 Fetches walking routes and provides turn-by-turn guidance
 optimized for visually impaired users.
-Uses Google Directions API for route data and Gemini for
-contextual guidance that accounts for real-time camera + sensor input.
+Uses Google Directions API for route data plus Groq-hosted
+vision guidance that accounts for real-time camera + sensor input.
 """
 
 import os
 import math
-import json
 import aiohttp
 from typing import Optional
 from dataclasses import dataclass, field, asdict
@@ -116,7 +115,7 @@ async def fetch_walking_route(
 ) -> Optional[NavigationRoute]:
     """
     Fetch a walking route from Google Directions API.
-    Falls back to Gemini-based estimation if no API key is available.
+    Falls back to a simple direct-route placeholder if no API key is available.
     """
     api_key = os.getenv("GOOGLE_MAPS_API_KEY", "")
 

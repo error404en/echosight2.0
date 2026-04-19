@@ -27,7 +27,7 @@ async def transcribe_audio(audio_base64: str) -> str:
         audio_bytes = base64.b64decode(audio_base64)
         
         # Groq SDK expects a tuple of (filename, file_bytes)
-        file_obj = ("audio.m4a", audio_bytes)
+        file_obj = ("audio.wav", audio_bytes)
         
         # Hit Groq Whisper endpoint
         transcription = await client.audio.transcriptions.create(

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// WebSocket service for streaming communication with FastAPI backend.
 /// Auto-detects emulator vs physical device and sets the correct URL.
@@ -20,6 +21,39 @@ class WebSocketService extends ChangeNotifier {
   bool get isConnected => _isConnected;
   String get lastError => _lastError;
   Stream<String> get responseStream => _responseController.stream;
+
+  WebSocketService() {
+    _loadSavedUrl();
+  }
+
+  Future<void> _loadSavedUrl() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedUrl = prefs.getString('serverUrl');
+      if (savedUrl != null && savedUrl.isNotEmpty) {
+        _serverUrl = savedUrl;
+        debugPrint('Loaded saved server URL: $_serverUrl');
+        notifyListeners();
+      }
+    } catch (_) {}
+  }
+
+  Future<void> saveServerUrl(String url) async {
+    _serverUrl = url;
+    _lastError = '';
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('serverUrl', url);
+      debugPrint('Saved server URL: $url');
+    } catch (_) {}
+    
+    // Reconnect to the new URL if we were trying to connect
+    if (_isConnected) {
+      disconnect();
+    }
+    connect();
+  }
 
   void setServerUrl(String url) {
     _serverUrl = url;
@@ -47,7 +81,7 @@ class WebSocketService extends ChangeNotifier {
     }
 
     // 3. WiFi — try the PC's local IP
-    //    Change this to match your PC's WiFi IP (run ipconfig to find it)
+    //    Updated to correct WiFi IP for current session.
     candidates.add('ws://192.168.0.103:8000/ws/chat');
 
     // Try each candidate with a quick health check
@@ -97,7 +131,7 @@ class WebSocketService extends ChangeNotifier {
       }
 
       // Health check first — give a clear error if backend is not running
-      final healthUrl = _serverUrl
+      String healthUrl = _serverUrl
           .replaceFirst('ws://', 'http://')
           .replaceFirst('wss://', 'https://')
           .replaceFirst('/ws/chat', '/health');
@@ -111,12 +145,32 @@ class WebSocketService extends ChangeNotifier {
         }
         debugPrint('✅ Backend health check passed');
       } catch (e) {
-        _lastError = 'Backend not reachable at $_serverUrl — is `python main.py` running?';
-        debugPrint('❌ $_lastError');
-        _isConnected = false;
-        notifyListeners();
-        _scheduleReconnect();
-        return;
+        debugPrint('❌ Configured URL $_serverUrl unreachable, attempting auto-detect...');
+        final oldUrl = _serverUrl;
+        _serverUrl = '';
+        await _detectServerUrl();
+
+        if (_serverUrl == oldUrl) {
+          _lastError = 'Backend not reachable at $_serverUrl — is `python main.py` running?';
+          debugPrint('❌ $_lastError');
+          _isConnected = false;
+          notifyListeners();
+          _scheduleReconnect();
+          return;
+        }
+
+        healthUrl = _serverUrl
+            .replaceFirst('ws://', 'http://')
+            .replaceFirst('wss://', 'https://')
+            .replaceFirst('/ws/chat', '/health');
+        
+        final healthResp = await http
+            .get(Uri.parse(healthUrl))
+            .timeout(const Duration(seconds: 5));
+        if (healthResp.statusCode != 200) {
+          throw Exception('Health check returned ${healthResp.statusCode}');
+        }
+        debugPrint('✅ Backend health check passed on new auto-detected URL');
       }
 
       // Now open WebSocket

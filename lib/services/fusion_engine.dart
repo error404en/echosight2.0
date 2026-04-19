@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
-import 'surroundings_service.dart';
 import '../models/assistant_mode.dart';
 import '../models/chat_message.dart';
 import '../models/vision_context.dart';
@@ -40,8 +39,6 @@ class FusionEngine extends ChangeNotifier {
   bool _isInitialized = false;
   bool _sceneUnchangedSkipDone = false;
   bool _surroundingsScanInFlight = false;
-  bool _sceneUnchangedSkipDone = false;
-  bool _proactiveScanInFlight = false;
 
   // Getters
   AssistantState get state => _state;
@@ -104,6 +101,15 @@ class FusionEngine extends ChangeNotifier {
     }
 
     ttsService.speak('${newMode.name} mode enabled');
+
+    // Auto-trigger immediate actions for interactive modes
+    if (newMode == AssistantMode.reader) {
+      Future.delayed(const Duration(milliseconds: 1500), _handleReadCommand);
+    } else if (newMode == AssistantMode.identify) {
+      Future.delayed(const Duration(milliseconds: 1500), () {
+        _handleVoiceInput(query: "Please identify and describe the objects in front of me in detail.");
+      });
+    }
   }
 
   /// Timer-driven scan for Surroundings / Sight (delta + scene_memory).
@@ -140,14 +146,35 @@ class FusionEngine extends ChangeNotifier {
     }
   }
 
-  bool _trySurroundingsVoiceCommand(String query) {
+  bool _tryGlobalVoiceCommand(String query) {
     final q = query.toLowerCase().trim();
+    
+    if (q.contains('navigate to') || q.contains('take me to') || q.contains('start navigation')) {
+       // Voice triggered start navigation. UI would need a navigator key to push, 
+       // but we can set mode and let them know. Actually, to truly navigate we need a destination.
+       setMode(AssistantMode.navigate);
+       ttsService.speak('Use the Navigate button to open the map interface.');
+       return true;
+    }
+    if (q.contains('emergency') || q.contains('help me') || q.contains('sos')) {
+       setMode(AssistantMode.emergency);
+       ttsService.speak('Use the SOS button at the bottom to trigger the alarm.');
+       return true;
+    }
+    if (q.contains('read this') || q.contains('what does it say')) {
+       setMode(AssistantMode.reader);
+       return true;
+    }
+    if (q.contains('surroundings') || q.contains('scan around')) {
+       setMode(AssistantMode.surroundings);
+       return true;
+    }
     if (q.contains('pause') || q.contains('quiet') || q.contains('mute')) {
-      surroundingsService.pause();
+      if (surroundingsService.isActive) surroundingsService.pause();
       return true;
     }
     if (q.contains('resume') || q == 'continue' || q.contains('unmute')) {
-      surroundingsService.resume();
+      if (surroundingsService.isActive) surroundingsService.resume();
       return true;
     }
     return false;
@@ -202,13 +229,13 @@ class FusionEngine extends ChangeNotifier {
     if (_isInitialized) return;
 
     try {
-      await Future.wait([
-        cameraService.initialize(),
-        speechService.initialize(),
-        ttsService.initialize(),
-        locationService.initialize(),
-        detectionService.initialize(),
-      ]);
+      // Initialize sequentially to avoid Android Permission Dialog lockups
+      await cameraService.initialize();
+      await ttsService.initialize();
+      await speechService.initialize();
+      await locationService.initialize();
+      await detectionService.initialize();
+      
       ocrService.initialize();
 
       // Connect WebSocket (non-blocking — will auto-retry in background)
@@ -265,21 +292,14 @@ class FusionEngine extends ChangeNotifier {
 
   /// Handle recorded audio voice input or text query
   Future<void> _handleVoiceInput({String? audioBase64, String? query}) async {
-    if (query != null &&
-        query.isNotEmpty &&
-        surroundingsService.isActive &&
-        _trySurroundingsVoiceCommand(query)) {
-      _setState(AssistantState.idle);
-      return;
+    if (query != null && query.isNotEmpty) {
+      if (_tryGlobalVoiceCommand(query)) {
+        _setState(AssistantState.idle);
+        return;
+      }
     }
 
     _setState(AssistantState.processing);
-
-    // 1. Check WebSocket connectivity FIRST
-    if (!webSocketService.isConnected) {
-      _handleOfflineVoice();
-      return;
-    }
 
     // Add query to local chat if we have text right away (on-device STT)
     if (query != null && query.isNotEmpty) {
@@ -290,7 +310,7 @@ class FusionEngine extends ChangeNotifier {
       ));
     }
 
-    // 2. Capture current camera frame for context
+    // 1. Capture current camera frame for context
     String? imageBase64;
     VisionContext? visionContext;
 
@@ -325,7 +345,12 @@ class FusionEngine extends ChangeNotifier {
       debugPrint('⚠️ GPS fetch failed: $e');
     }
 
-    // 4. Send payload to backend
+    // 4. Send payload to backend or handle offline
+    if (!webSocketService.isConnected) {
+      _handleOfflineResponse(query ?? '', visionContext);
+      return;
+    }
+
     _streamingResponse = '';
     webSocketService.sendMessage(
       sessionId: _sessionId,
@@ -335,21 +360,11 @@ class FusionEngine extends ChangeNotifier {
       visionContext: visionContext?.toJson(),
       locationData: gpsData,
       mode: _currentMode.name.toLowerCase(),
+      sceneMemory: (_isProactiveMode(_currentMode) && surroundingsService.isActive)
+          ? surroundingsService.lastSceneDescription
+          : null,
     );
     _setState(AssistantState.thinking);
-  }
-
-  /// Handle when user tries to speak but we're offline.
-  void _handleOfflineVoice() {
-    final msg = 'I cannot process voice commands right now because '
-        'the server is not connected. Please check your connection in settings.';
-    _addMessage(ChatMessage(
-      content: msg,
-      role: MessageRole.assistant,
-    ));
-    _streamingResponse = msg;
-    ttsService.speak(msg);
-    _setState(AssistantState.speaking);
   }
 
   /// (Legacy text input handler for typing if needed)
@@ -414,6 +429,10 @@ class FusionEngine extends ChangeNotifier {
   /// Handle streaming response chunks from the backend.
   void _handleResponseChunk(String chunk) {
     if (chunk == '[DONE]') {
+      if (_sceneUnchangedSkipDone) {
+        _sceneUnchangedSkipDone = false;
+        return;
+      }
       // Response complete
       if (_streamingResponse.isNotEmpty) {
         _addMessage(ChatMessage(
@@ -434,6 +453,20 @@ class FusionEngine extends ChangeNotifier {
       ));
       // Speak the error via local TTS so user always hears feedback
       ttsService.speak(errorMsg);
+      _setState(AssistantState.speaking);
+      return;
+    }
+
+    if (chunk == '[RATE_LIMIT]') {
+      _streamingResponse = 'API quota reached. Please wait a moment.';
+      _addMessage(ChatMessage(
+        content: 'Rate limit reached. Try speaking to pause or wait.',
+        role: MessageRole.assistant,
+      ));
+      ttsService.speak('API rate limit reached. Pausing automatic scans.');
+      if (surroundingsService.isActive && !surroundingsService.isPaused) {
+        surroundingsService.pause();
+      }
       _setState(AssistantState.speaking);
       return;
     }
@@ -473,7 +506,9 @@ class FusionEngine extends ChangeNotifier {
     }
 
     if (chunk == '[SCENE_UNCHANGED]') {
-      // Surroundings / Sight mode: nothing changed, stay silent
+      _streamingResponse = '';
+      _sceneUnchangedSkipDone = true;
+      _setState(AssistantState.idle);
       debugPrint('👁️ Surroundings: No changes detected');
       return;
     }
@@ -504,6 +539,7 @@ class FusionEngine extends ChangeNotifier {
             sessionId: _sessionId,
             query: 'Please read all the text visible in this image aloud. Organize it clearly.',
             imageBase64: imageBase64,
+            mode: 'reader',
           );
           _setState(AssistantState.thinking);
         } else {

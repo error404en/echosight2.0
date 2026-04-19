@@ -133,7 +133,7 @@ class CameraService extends ChangeNotifier {
     }
   }
 
-  /// Capture a single frame as base64 JPEG (for sending to Gemini API).
+  /// Capture a single frame as base64 JPEG (for sending to the Groq vision API).
   Future<String?> captureFrame() async {
     final ok = await _captureOnce();
     return ok ? _lastBase64Frame : null;
