@@ -1,27 +1,91 @@
 """
-EchoSight Backend — Vision Engine
-Handles Gemini 3.1 Pro vision analysis with streaming support.
+EchoSight Backend - Vision Engine
+Handles Groq-hosted open-weight vision analysis with streaming support.
 """
 
-import base64
 import asyncio
-from typing import Optional, AsyncGenerator
-from google import genai
-from google.genai import types
+import os
+from typing import AsyncGenerator, Optional
 
+from groq import AsyncGroq
+
+DEFAULT_VISION_MODEL_ID = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 # Will be initialized in main.py lifespan
-client: Optional[genai.Client] = None
-MODEL_ID = "gemini-3.1-pro-preview"
+client: Optional[AsyncGroq] = None
+
+
+def get_model_id() -> str:
+    """Return the configured Groq vision model id."""
+    configured = os.getenv("GROQ_VISION_MODEL", "").strip()
+    return configured or DEFAULT_VISION_MODEL_ID
 
 
 def init_client(api_key: str):
-    """Initialize the Gemini client."""
+    """Initialize the Groq client."""
     global client
-    client = genai.Client(api_key=api_key)
+    client = AsyncGroq(api_key=api_key)
 
 
-async def analyze_with_gemini(
+def _build_context_parts(
+    vision_context: Optional[dict],
+    location_data: Optional[dict],
+) -> list[str]:
+    """Flatten sensor context into text the vision model can reliably use."""
+    context_parts: list[str] = []
+
+    if vision_context:
+        if vision_context.get("objects"):
+            objects = ", ".join(
+                f"{obj.get('label', 'unknown')} ({obj.get('distance', 'mid')} distance, {obj.get('position', 'unknown')})"
+                for obj in vision_context["objects"]
+            )
+            context_parts.append(f"Detected objects: {objects}")
+        if vision_context.get("text"):
+            context_parts.append(f"OCR text: {vision_context['text']}")
+        if vision_context.get("environment"):
+            context_parts.append(f"Environment: {vision_context['environment']}")
+        if vision_context.get("scene_memory"):
+            context_parts.append(
+                "Previous scene description from the last scan: "
+                f"{vision_context['scene_memory']}"
+            )
+        if vision_context.get("navigation"):
+            navigation = vision_context["navigation"]
+            nav_parts: list[str] = []
+            if navigation.get("status"):
+                nav_parts.append(f"status {navigation['status']}")
+            if navigation.get("current_step") and navigation.get("total_steps"):
+                nav_parts.append(
+                    f"step {navigation['current_step']} of {navigation['total_steps']}"
+                )
+            if navigation.get("instruction"):
+                nav_parts.append(f"current instruction: {navigation['instruction']}")
+            if navigation.get("distance_remaining"):
+                nav_parts.append(
+                    f"distance remaining: {navigation['distance_remaining']}"
+                )
+            if navigation.get("direction_to_waypoint"):
+                nav_parts.append(f"direction: {navigation['direction_to_waypoint']}")
+            if navigation.get("next_instruction"):
+                nav_parts.append(f"next: {navigation['next_instruction']}")
+            if nav_parts:
+                context_parts.append("Navigation: " + "; ".join(nav_parts))
+
+    if location_data:
+        lat = location_data.get("latitude", 0.0)
+        lon = location_data.get("longitude", 0.0)
+        heading = location_data.get("heading", 0.0)
+        speed = location_data.get("speed", 0.0)
+        context_parts.append(
+            "GPS Data: "
+            f"Lat {lat:.5f}, Lon {lon:.5f}, Heading {heading:.1f}deg, Speed {speed:.1f}m/s"
+        )
+
+    return context_parts
+
+
+async def analyze_with_groq(
     query: str,
     system_prompt: str,
     conversation_history: list[dict],
@@ -29,15 +93,11 @@ async def analyze_with_gemini(
     vision_context: Optional[dict] = None,
     location_data: Optional[dict] = None,
 ) -> AsyncGenerator[str, None]:
-    """
-    Stream a response from Gemini 3.1 Pro.
-    Supports text-only, vision+text, and GPS queries.
-    """
+    """Stream a response from the configured Groq vision model."""
     if client is None:
-        yield "Error: Gemini client not initialized. Please set GEMINI_API_KEY."
+        yield "[ERROR] Groq client not initialized. Please set GROQ_API_KEY."
         return
 
-    # Trigger Emergency Override if 'help' or 'emergency' is spoken.
     lowercase_query = query.lower()
     if "help" in lowercase_query or "emergency" in lowercase_query:
         system_prompt = (
@@ -46,89 +106,69 @@ async def analyze_with_gemini(
             "DROP-OFFS, INCOMING VEHICLES, OR THREATS. REPORT THEM IMMEDIATELY IN 2 SENTENCES OR LESS."
         )
 
-    # Build the content parts for the current message
-    parts = []
+    messages = [{"role": "system", "content": system_prompt}]
 
-    # Add vision context as text if available
-    context_parts = []
-    if vision_context:
-        if vision_context.get("objects"):
-            objs = ", ".join(
-                f"{o['label']} ({o.get('distance', 'mid')} distance, {o.get('position', 'unknown')})"
-                for o in vision_context["objects"]
-            )
-            context_parts.append(f"Detected objects: {objs}")
-        if vision_context.get("text"):
-            context_parts.append(f"OCR text: {vision_context['text']}")
-        if vision_context.get("environment"):
-            context_parts.append(f"Environment: {vision_context['environment']}")
-            
-    if location_data:
-        lat = location_data.get('latitude', 0.0)
-        lon = location_data.get('longitude', 0.0)
-        heading = location_data.get('heading', 0.0)
-        speed = location_data.get('speed', 0.0)
-        context_parts.append(f"GPS Data: Lat {lat:.5f}, Lon {lon:.5f}, Heading {heading:.1f}deg, Speed {speed:.1f}m/s")
-        
+    for message in conversation_history[-10:]:
+        role = message["role"]
+        if role in ("model", "assistant"):
+            role = "assistant"
+        else:
+            role = "user"
+
+        text_content = " ".join(
+            part.get("text", "")
+            for part in message.get("parts", [])
+            if "text" in part
+        ).strip()
+        if text_content:
+            messages.append({"role": role, "content": text_content})
+
+    current_content: list[dict] = []
+    context_parts = _build_context_parts(vision_context, location_data)
     if context_parts:
-        parts.append(types.Part.from_text(
-            text="[Sensor Context Data]\n" + "\n".join(context_parts)
-        ))
-
-    # Add image if provided
-    if image_base64:
-        try:
-            image_bytes = base64.b64decode(image_base64)
-            parts.append(types.Part.from_bytes(
-                data=image_bytes,
-                mime_type="image/jpeg",
-            ))
-        except Exception as e:
-            print(f"Warning: Could not decode image: {e}")
-
-    # Add the user's query
-    parts.append(types.Part.from_text(text=query))
-
-    # Build contents with conversation history + current message
-    contents = []
-
-    # Add conversation history (limited to avoid token overflow)
-    for msg in conversation_history[-10:]:
-        role = msg["role"]
-        if role == "assistant":
-            role = "model"
-        msg_parts = [types.Part.from_text(text=p["text"]) for p in msg.get("parts", [])]
-        contents.append(types.Content(role=role, parts=msg_parts))
-
-    # Add current user message
-    contents.append(types.Content(role="user", parts=parts))
-
-    # Generate streaming response
-    try:
-        response = client.models.generate_content_stream(
-            model=MODEL_ID,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=1.0,
-                max_output_tokens=1024,
-            ),
+        current_content.append(
+            {
+                "type": "text",
+                "text": "[Sensor Context Data]\n" + "\n".join(context_parts),
+            }
         )
 
-        for chunk in response:
-            if chunk.text:
-                yield chunk.text
-            # Small delay to prevent blocking
+    current_content.append({"type": "text", "text": query})
+
+    if image_base64:
+        current_content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
+            }
+        )
+
+    messages.append({"role": "user", "content": current_content})
+
+    try:
+        chat_completion = await client.chat.completions.create(
+            messages=messages,
+            model=get_model_id(),
+            temperature=0.4,
+            max_completion_tokens=1024,
+            stream=True,
+        )
+
+        async for chunk in chat_completion:
+            content = chunk.choices[0].delta.content
+            if content:
+                yield content
             await asyncio.sleep(0)
 
-    except Exception as e:
-        error_msg = str(e)
-        if "quota" in error_msg.lower() or "rate" in error_msg.lower():
-            yield "I'm currently rate-limited. Please try again in a moment."
-        elif "api_key" in error_msg.lower() or "auth" in error_msg.lower():
-            yield "API key issue. Please check your Gemini API key configuration."
+    except Exception as exc:
+        error_msg = str(exc)
+        lowered = error_msg.lower()
+        if "quota" in lowered or "rate" in lowered or "429" in error_msg:
+            yield "[RATE_LIMIT]"
+        elif "api_key" in lowered or "auth" in lowered:
+            yield "[ERROR] API key issue. Please check your Groq API key configuration."
         else:
-            yield f"I encountered an error: {error_msg}"
+            yield f"[ERROR] {error_msg}"
 
 
 async def quick_analyze(
@@ -137,26 +177,28 @@ async def quick_analyze(
 ) -> str:
     """One-shot vision analysis without conversation history."""
     if client is None:
-        return "Gemini client not initialized."
+        return "Groq client not initialized."
 
     try:
-        image_bytes = base64.b64decode(image_base64)
-        response = client.models.generate_content(
-            model=MODEL_ID,
-            contents=[
-                types.Content(
-                    role="user",
-                    parts=[
-                        types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                        types.Part.from_text(text=prompt),
+        response = await client.chat.completions.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_base64}"
+                            },
+                        },
                     ],
-                )
+                }
             ],
-            config=types.GenerateContentConfig(
-                temperature=0.7,
-                max_output_tokens=512,
-            ),
+            model=get_model_id(),
+            temperature=0.3,
+            max_completion_tokens=512,
         )
-        return response.text or "Could not analyze the image."
-    except Exception as e:
-        return f"Vision analysis error: {str(e)}"
+        return response.choices[0].message.content or "Could not analyze the image."
+    except Exception as exc:
+        return f"Vision analysis error: {str(exc)}"

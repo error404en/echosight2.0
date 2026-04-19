@@ -9,8 +9,15 @@ import '../widgets/mic_button.dart';
 import '../widgets/status_indicator.dart';
 import '../widgets/caption_overlay.dart';
 import '../services/camera_service.dart';
+import '../services/speech_service.dart';
+import '../services/emergency_service.dart';
+import '../services/navigation_service.dart';
+import '../services/surroundings_service.dart';
+import '../models/assistant_mode.dart';
 import 'chat_screen.dart';
 import 'settings_screen.dart';
+import 'navigation_screen.dart';
+import 'emergency_screen.dart';
 
 /// Main home screen — voice-first UI with camera preview.
 class HomeScreen extends StatefulWidget {
@@ -62,6 +69,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
               // Dark gradient overlay
               _buildGradientOverlay(),
+
+              // Global Mic area for visually impaired
+              GestureDetector(
+                onTap: () => _handleMicTap(fusion),
+                onLongPress: () {
+                  HapticFeedback.heavyImpact();
+                  fusion.toggleContinuousMode();
+                },
+                behavior: HitTestBehavior.translucent,
+                child: const SizedBox.expand(),
+              ),
 
               // Top status area
               Positioned(
@@ -195,6 +213,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildBottomControls(BuildContext context, FusionEngine fusion) {
+    final bottomSheetWidth = MediaQuery.sizeOf(context).width;
     return Positioned(
       bottom: 0,
       left: 0,
@@ -207,7 +226,64 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Mic button
+            // Mode Selector Strip
+            SizedBox(
+              height: 40,
+              child: ListView.builder(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                itemCount: AssistantMode.values.length,
+                itemBuilder: (context, index) {
+                  final mode = AssistantMode.values[index];
+                  final isSelected = fusion.currentMode == mode;
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: ChoiceChip(
+                      label: Row(
+                        children: [
+                          Icon(mode.icon, size: 16, color: isSelected ? Colors.white : Colors.white70),
+                          const SizedBox(width: 4),
+                          Text(mode.name),
+                        ],
+                      ),
+                      selected: isSelected,
+                      onSelected: (selected) {
+                        if (selected) {
+                          HapticFeedback.selectionClick();
+                          if (mode == AssistantMode.navigate) {
+                            Navigator.push(context, MaterialPageRoute(builder: (_) => const NavigationScreen()));
+                            return;
+                          }
+                          if (mode == AssistantMode.emergency) {
+                            final emergency = context.read<EmergencyService>();
+                            emergency.activate();
+                            Navigator.push(context, MaterialPageRoute(builder: (_) => const EmergencyScreen()));
+                            return;
+                          }
+                          fusion.setMode(mode);
+                        }
+                      },
+                      backgroundColor: Colors.black45,
+                      selectedColor: mode.color.withOpacity(0.3),
+                      labelStyle: TextStyle(
+                        color: isSelected ? Colors.white : Colors.white70,
+                        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                        fontSize: 13,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(20),
+                        side: BorderSide(
+                          color: isSelected ? mode.color.withOpacity(0.5) : Colors.transparent,
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Mic button logic
             MicButton(
               state: fusion.state,
               size: 80,
@@ -236,63 +312,110 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
             const SizedBox(height: 12),
 
-            // Mode indicator
+            // Mode indicator text
             Text(
-              fusion.continuousMode ? 'Continuous Mode' : 'Tap to Speak',
+              '${fusion.currentMode.name} Mode • ${fusion.continuousMode ? 'Continuous' : 'Tap to Speak'}',
               style: TextStyle(
-                color: EchoSightTheme.textSecondary.withOpacity(0.7),
+                color: fusion.currentMode.color,
                 fontSize: 13,
-                fontWeight: FontWeight.w500,
+                fontWeight: FontWeight.w600,
               ),
+            ),
+
+            Consumer<SurroundingsService>(
+              builder: (context, surroundings, _) {
+                if (!surroundings.isActive) return const SizedBox.shrink();
+                final paused = surroundings.isPaused;
+                final label = paused
+                    ? 'Stream paused — say resume'
+                    : '${surroundings.verbosity.label} • scan every ${surroundings.verbosity.scanIntervalSeconds}s';
+                return Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    label,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: (paused ? Colors.amberAccent : Colors.cyanAccent).withOpacity(0.9),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                );
+              },
             ),
 
             const SizedBox(height: 8),
 
-            // Quick action buttons
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                _QuickActionButton(
-                  icon: Icons.cameraswitch_outlined,
-                  label: 'Flip',
-                  onTap: () {
-                    HapticFeedback.lightImpact();
-                    context.read<CameraService>().switchCamera();
-                  },
+            // Quick action buttons — scroll horizontally on narrow widths (avoids Row overflow).
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minWidth: bottomSheetWidth),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    _QuickActionButton(
+                      icon: Icons.cameraswitch_outlined,
+                      label: 'Flip',
+                      onTap: () {
+                        HapticFeedback.lightImpact();
+                        context.read<CameraService>().switchCamera();
+                      },
+                    ),
+                    const SizedBox(width: 16),
+                    _QuickActionButton(
+                      icon: fusion.speechService.inputMode == SpeechInputMode.onDevice
+                          ? Icons.smartphone
+                          : Icons.cloud,
+                      label: fusion.speechService.inputMode == SpeechInputMode.onDevice
+                          ? 'Local STT'
+                          : 'Cloud STT',
+                      onTap: () {
+                        HapticFeedback.lightImpact();
+                        fusion.speechService.toggleInputMode();
+                      },
+                    ),
+                    const SizedBox(width: 16),
+                    _QuickActionButton(
+                      icon: Icons.navigation,
+                      label: 'Navigate',
+                      color: Colors.greenAccent,
+                      onTap: () {
+                        HapticFeedback.mediumImpact();
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => const NavigationScreen()),
+                        );
+                      },
+                    ),
+                    const SizedBox(width: 16),
+                    _QuickActionButton(
+                      icon: Icons.emergency,
+                      label: 'SOS',
+                      color: Colors.redAccent,
+                      onTap: () {
+                        HapticFeedback.heavyImpact();
+                        final emergency = context.read<EmergencyService>();
+                        emergency.activate();
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => const EmergencyScreen()),
+                        );
+                      },
+                    ),
+                    const SizedBox(width: 16),
+                    _QuickActionButton(
+                      icon: Icons.refresh,
+                      label: 'Clear',
+                      onTap: () {
+                        HapticFeedback.lightImpact();
+                        fusion.clearConversation();
+                      },
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 16),
-                _QuickActionButton(
-                  icon: Icons.pause_presentation,
-                  label: 'Pause',
-                  onTap: () {
-                    HapticFeedback.lightImpact();
-                    final camera = context.read<CameraService>();
-                    // Toggle pause/resume
-                    // Note: Needs a state check, we'll just call pause for now 
-                    // or maybe we add a simple toggle. For now, pause/resume works if we toggle logic natively or we can just pause.
-                    camera.pausePreview();
-                  },
-                ),
-                const SizedBox(width: 16),
-                _QuickActionButton(
-                  icon: Icons.menu_book,
-                  label: 'Read',
-                  onTap: () {
-                    HapticFeedback.mediumImpact();
-                    fusion.clearConversation();
-                    _handleMicTap(fusion);
-                  },
-                ),
-                const SizedBox(width: 16),
-                _QuickActionButton(
-                  icon: Icons.refresh,
-                  label: 'Clear',
-                  onTap: () {
-                    HapticFeedback.lightImpact();
-                    fusion.clearConversation();
-                  },
-                ),
-              ],
+              ),
             ),
           ],
         ),
@@ -326,15 +449,18 @@ class _QuickActionButton extends StatelessWidget {
   final IconData icon;
   final String label;
   final VoidCallback onTap;
+  final Color? color;
 
   const _QuickActionButton({
     required this.icon,
     required this.label,
     required this.onTap,
+    this.color,
   });
 
   @override
   Widget build(BuildContext context) {
+    final c = color ?? Colors.white70;
     return GestureDetector(
       onTap: onTap,
       child: Column(
@@ -343,19 +469,19 @@ class _QuickActionButton extends StatelessWidget {
             width: 44,
             height: 44,
             decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.1),
+              color: c.withOpacity(0.1),
               shape: BoxShape.circle,
               border: Border.all(
-                color: Colors.white.withOpacity(0.15),
+                color: c.withOpacity(0.3),
               ),
             ),
-            child: Icon(icon, color: Colors.white70, size: 20),
+            child: Icon(icon, color: c, size: 20),
           ),
           const SizedBox(height: 4),
           Text(
             label,
             style: TextStyle(
-              color: EchoSightTheme.textSecondary.withOpacity(0.6),
+              color: c.withOpacity(0.8),
               fontSize: 11,
               fontWeight: FontWeight.w500,
             ),
@@ -365,3 +491,4 @@ class _QuickActionButton extends StatelessWidget {
     );
   }
 }
+

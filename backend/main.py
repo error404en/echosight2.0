@@ -1,6 +1,6 @@
 """
 EchoSight Backend — FastAPI Server
-WebSocket streaming chat + Vision analysis endpoints powered by Gemini 3.1 Pro.
+WebSocket streaming chat + vision analysis endpoints powered by Groq.
 """
 
 import json
@@ -14,9 +14,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from conversation import get_session, clear_session
-from vision_engine import init_client, analyze_with_gemini, quick_analyze
+from vision_engine import init_client, analyze_with_groq, get_model_id, quick_analyze
 from audio_engine import init_audio_engine, transcribe_audio, stream_tts
 from face_engine import init_face_engine, detect_known_faces
+from navigation_engine import (
+    fetch_walking_route, get_active_route, clear_route,
+    build_navigation_context,
+)
 
 # Load environment
 load_dotenv()
@@ -25,16 +29,36 @@ load_dotenv()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize services on startup."""
-    api_key = os.getenv("GEMINI_API_KEY", "")
-    if api_key and api_key != "your_gemini_api_key_here":
-        init_client(api_key)
-        print("[OK] Gemini 3.1 Pro client initialized")
-    else:
-        print("[WARN] No GEMINI_API_KEY set - running in mock mode")
-        
     groq_api_key = os.getenv("GROQ_API_KEY", "")
+
+    if groq_api_key and groq_api_key != "your_groq_api_key_here":
+        init_client(groq_api_key)
+        print(f"[OK] Groq vision client initialized ({get_model_id()})")
+    else:
+        print("[WARN] No GROQ_API_KEY set - running in mock mode")
+
     init_audio_engine(groq_api_key)
     init_face_engine()
+
+    # Permanently resolve Flutter USB/ADB connectivity by mapping the port on startup
+    try:
+        import subprocess
+        import shutil
+
+        adb_path = shutil.which("adb")
+        if not adb_path:
+            win_path = os.path.expanduser(r"~\AppData\Local\Android\Sdk\platform-tools\adb.exe")
+            if os.path.exists(win_path):
+                adb_path = win_path
+
+        if adb_path:
+            subprocess.run([adb_path, "reverse", "tcp:8000", "tcp:8000"], check=False)
+            print("[OK] Set up ADB reverse port forwarding for port 8000")
+        else:
+            print("[WARN] Could not find ADB executable to set up port forwarding.")
+    except Exception as e:
+        print(f"[WARN] Could not set up ADB reverse: {e}")
+
     yield
 
 
@@ -60,7 +84,12 @@ app.add_middleware(
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "ok", "service": "EchoSight API", "model": "gemini-3.1-pro-preview"}
+    return {
+        "status": "ok",
+        "service": "EchoSight API",
+        "provider": "groq",
+        "model": get_model_id(),
+    }
 
 
 class VisionRequest(BaseModel):
@@ -105,30 +134,69 @@ async def add_known_face(request: AddFaceRequest):
     """Save a face to the local database and hot-reload."""
     if not request.name.strip() or not request.image:
         raise HTTPException(status_code=400, detail="Name and image required.")
-    
+
     try:
         from face_engine import KNOWN_FACES_DIR, init_face_engine
         import base64
         import os
-        
+
         # Ensure directory exists
         if not os.path.exists(KNOWN_FACES_DIR):
             os.makedirs(KNOWN_FACES_DIR)
-            
+
         # Clean filename
         clean_name = "".join(x for x in request.name if x.isalnum() or x in " _-")
         filepath = os.path.join(KNOWN_FACES_DIR, f"{clean_name}.jpg")
-        
+
         # Save image
         image_bytes = base64.b64decode(request.image)
         with open(filepath, "wb") as f:
             f.write(image_bytes)
-            
+
         # Hot reload engine
         init_face_engine()
         return {"status": "success", "name": request.name}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── Navigation Endpoints ───────────────────────────────────────
+
+class StartNavigationRequest(BaseModel):
+    session_id: str
+    destination: str
+    latitude: float
+    longitude: float
+
+
+@app.post("/api/navigate/start")
+async def start_navigation(request: StartNavigationRequest):
+    """Fetch a walking route and begin guided navigation."""
+    try:
+        route = await fetch_walking_route(
+            origin_lat=request.latitude,
+            origin_lng=request.longitude,
+            destination=request.destination,
+            session_id=request.session_id,
+        )
+        if route is None:
+            raise HTTPException(status_code=404, detail="Could not find a route to that destination.")
+        return {"status": "ok", "route": route.to_dict()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class StopNavigationRequest(BaseModel):
+    session_id: str
+
+
+@app.post("/api/navigate/stop")
+async def stop_navigation(request: StopNavigationRequest):
+    """Stop active navigation for a session."""
+    clear_route(request.session_id)
+    return {"status": "stopped", "session_id": request.session_id}
 
 
 # ─── WebSocket Chat Endpoint ────────────────────────────────────
@@ -137,7 +205,7 @@ async def add_known_face(request: AddFaceRequest):
 async def websocket_chat(websocket: WebSocket):
     """
     Streaming conversational chat over WebSocket.
-    
+
     Client sends JSON:
     {
         "session_id": "unique-id",
@@ -145,7 +213,7 @@ async def websocket_chat(websocket: WebSocket):
         "image": "base64 JPEG (optional)",
         "vision_context": { "objects": [...], "text": "...", "environment": "..." } (optional)
     }
-    
+
     Server streams back text chunks, ending with [DONE].
     """
     await websocket.accept()
@@ -167,6 +235,7 @@ async def websocket_chat(websocket: WebSocket):
             audio_b64 = data.get("audio")
             image_b64 = data.get("image")
             vision_context = data.get("vision_context")
+            mode = data.get("mode", "assistant")
 
             # 1. Transcribe Audio if present
             if audio_b64:
@@ -193,18 +262,47 @@ async def websocket_chat(websocket: WebSocket):
             session = get_session(session_id)
             session.add_user_message(query, vision_context)
 
+            # ─── Navigation context injection ───────────────────
+            location_data = data.get("location")
+            active_route = get_active_route(session_id)
+            if active_route and not active_route.is_complete and location_data:
+                nav_ctx = build_navigation_context(
+                    route=active_route,
+                    current_lat=location_data.get("latitude", 0),
+                    current_lng=location_data.get("longitude", 0),
+                    heading=location_data.get("heading", 0),
+                )
+                # Override mode to navigation_active
+                mode = "navigation_active"
+                # Append turn-by-turn data to vision context
+                if not vision_context:
+                    vision_context = {}
+                vision_context["navigation"] = nav_ctx
+
+                # Notify Flutter if arrived
+                if nav_ctx.get("status") == "arrived":
+                    await websocket.send_text("[NAV_ARRIVED]")
+
+            # ─── Surroundings scene memory injection ─────────────
+            scene_memory = data.get("scene_memory", "")
+            if mode in ("surroundings", "sight") and scene_memory:
+                if not vision_context:
+                    vision_context = {}
+                vision_context["scene_memory"] = scene_memory
+
             # Build prompts
-            system_prompt = session.get_system_prompt()
+            system_prompt = session.get_system_prompt(mode)
             history = session.get_history_for_api()
 
-            # Stream response from Gemini
+            # Stream response from the Groq vision model
             full_response = []
-            async for chunk in analyze_with_gemini(
+            async for chunk in analyze_with_groq(
                 query=query,
                 system_prompt=system_prompt,
                 conversation_history=history[:-1],  # Exclude current message (already in contents)
                 image_base64=image_b64,
                 vision_context=vision_context,
+                location_data=location_data,
             ):
                 full_response.append(chunk)
                 await websocket.send_text(chunk)
@@ -213,9 +311,24 @@ async def websocket_chat(websocket: WebSocket):
             complete_response = "".join(full_response)
             session.add_assistant_message(complete_response)
 
-            # Stream Edge-TTS audio back to Flutter
-            async for audio_chunk in stream_tts(complete_response):
-                await websocket.send_text(f"[AUDIO] {audio_chunk}")
+            # For surroundings mode: send scene memory back to Flutter
+            # and skip TTS if "no changes"
+            is_no_change = (
+                mode in ("surroundings", "sight") and
+                complete_response.strip().lower().replace(".", "") in
+                ["no changes", "no change", "nothing changed"]
+            )
+
+            if is_no_change:
+                await websocket.send_text("[SCENE_UNCHANGED]")
+            else:
+                # Send scene memory update back to Flutter
+                if mode in ("surroundings", "sight"):
+                    await websocket.send_text(f"[SCENE_MEMORY] {complete_response}")
+
+                # Stream Edge-TTS audio back to Flutter
+                async for audio_chunk in stream_tts(complete_response):
+                    await websocket.send_text(f"[AUDIO] {audio_chunk}")
 
             # Signal end of response
             await websocket.send_text("[DONE]")

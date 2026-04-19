@@ -7,6 +7,7 @@ import '../services/fusion_engine.dart';
 import '../services/camera_service.dart';
 import '../services/tts_service.dart';
 import '../services/websocket_service.dart';
+import '../services/surroundings_service.dart';
 
 /// Settings screen for configuring the app.
 class SettingsScreen extends StatefulWidget {
@@ -53,42 +54,128 @@ class _SettingsScreenState extends State<SettingsScreen> {
             _buildServerUrlField(),
             const Divider(height: 1, color: Colors.white10),
             Consumer<WebSocketService>(
-              builder: (context, ws, _) => _SettingsTile(
-                title: 'Server Status',
-                subtitle: ws.isConnected ? 'Connected' : 'Disconnected',
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 10,
-                      height: 10,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: ws.isConnected
-                            ? EchoSightTheme.success
-                            : EchoSightTheme.danger,
-                        boxShadow: [
-                          BoxShadow(
-                            color: (ws.isConnected
-                                    ? EchoSightTheme.success
-                                    : EchoSightTheme.danger)
-                                .withOpacity(0.5),
-                            blurRadius: 6,
+              builder: (context, ws, _) => Column(
+                children: [
+                  _SettingsTile(
+                    title: 'Server Status',
+                    subtitle: ws.isConnected ? 'Connected ✓' : 'Disconnected',
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 10,
+                          height: 10,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: ws.isConnected
+                                ? EchoSightTheme.success
+                                : EchoSightTheme.danger,
+                            boxShadow: [
+                              BoxShadow(
+                                color: (ws.isConnected
+                                        ? EchoSightTheme.success
+                                        : EchoSightTheme.danger)
+                                    .withOpacity(0.5),
+                                blurRadius: 6,
+                              ),
+                            ],
                           ),
-                        ],
+                        ),
+                        const SizedBox(width: 12),
+                        IconButton(
+                          icon: const Icon(Icons.refresh, size: 20),
+                          tooltip: 'Reconnect',
+                          onPressed: () {
+                            final url = _serverUrlController.text.trim();
+                            if (url.isNotEmpty) {
+                              ws.saveServerUrl(url); // Also triggers reconnect
+                            } else {
+                              ws.retryConnection();
+                            }
+
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: const Text('Reconnecting...'),
+                                backgroundColor: EchoSightTheme.primary,
+                                duration: const Duration(seconds: 2),
+                                behavior: SnackBarBehavior.floating,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                  // Show error message if there is one
+                  if (ws.lastError.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                      child: Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: EchoSightTheme.danger.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: EchoSightTheme.danger.withOpacity(0.3),
+                          ),
+                        ),
+                        child: Text(
+                          ws.lastError,
+                          style: TextStyle(
+                            color: EchoSightTheme.danger,
+                            fontSize: 12,
+                          ),
+                        ),
                       ),
                     ),
-                    const SizedBox(width: 12),
-                    IconButton(
-                      icon: const Icon(Icons.refresh, size: 20),
-                      onPressed: () {
-                        ws.disconnect();
-                        ws.setServerUrl(_serverUrlController.text.trim());
-                        ws.connect();
-                      },
+                ],
+              ),
+            ),
+          ]),
+
+          const SizedBox(height: 8),
+
+          // Connection help info
+          _buildCard([
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.help_outline, size: 16, color: EchoSightTheme.textSecondary),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Connection Guide',
+                        style: TextStyle(
+                          color: EchoSightTheme.textSecondary,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  _buildHelpRow('USB (adb reverse)', 'ws://127.0.0.1:8000/ws/chat'),
+                  const SizedBox(height: 6),
+                  _buildHelpRow('Emulator', 'ws://10.0.2.2:8000/ws/chat'),
+                  const SizedBox(height: 6),
+                  _buildHelpRow('WiFi', 'ws://<PC-IP>:8000/ws/chat'),
+                  const SizedBox(height: 10),
+                  Text(
+                    'For USB: run "adb reverse tcp:8000 tcp:8000" on your PC.',
+                    style: TextStyle(
+                      color: EchoSightTheme.textSecondary.withOpacity(0.6),
+                      fontSize: 11,
+                      fontStyle: FontStyle.italic,
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
           ]),
@@ -124,6 +211,78 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 min: 0.5,
                 max: 2.0,
                 onChanged: (v) => tts.setPitch(v),
+              ),
+            ),
+          ]),
+
+          const SizedBox(height: 24),
+
+          // ── Surroundings stream (digital retina) ──
+          _SectionHeader(title: 'Surroundings stream', icon: Icons.panorama_wide_angle_select),
+          _buildCard([
+            Consumer<SurroundingsService>(
+              builder: (context, s, _) => Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Verbosity',
+                      style: TextStyle(
+                        color: EchoSightTheme.textSecondary,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      s.verbosity.description,
+                      style: TextStyle(
+                        color: EchoSightTheme.textSecondary.withOpacity(0.75),
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    SegmentedButton<SurroundingsVerbosity>(
+                      segments: const [
+                        ButtonSegment(
+                          value: SurroundingsVerbosity.minimal,
+                          label: Text('Minimal'),
+                          tooltip: 'Safety only — radar style',
+                        ),
+                        ButtonSegment(
+                          value: SurroundingsVerbosity.standard,
+                          label: Text('Standard'),
+                        ),
+                        ButtonSegment(
+                          value: SurroundingsVerbosity.immersive,
+                          label: Text('Immersive'),
+                        ),
+                      ],
+                      selected: {s.verbosity},
+                      onSelectionChanged: (next) {
+                        if (next.isEmpty) return;
+                        s.setVerbosity(next.first, speakFeedback: false);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('${next.first.label}: ${next.first.description}'),
+                            backgroundColor: EchoSightTheme.primary,
+                            duration: const Duration(seconds: 2),
+                            behavior: SnackBarBehavior.floating,
+                          ),
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Scan every ${s.verbosity.scanIntervalSeconds} seconds when Surroundings or Sight mode is on.',
+                      style: TextStyle(
+                        color: EchoSightTheme.textSecondary.withOpacity(0.55),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ]),
@@ -192,7 +351,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const Divider(height: 1, color: Colors.white10),
             _SettingsTile(
               title: 'AI Model',
-              subtitle: 'Gemini 3.1 Pro (Google)',
+              subtitle: 'Groq + Llama 4 Scout Vision',
             ),
             const Divider(height: 1, color: Colors.white10),
             _SettingsTile(
@@ -204,6 +363,40 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 40),
         ],
       ),
+    );
+  }
+
+  Widget _buildHelpRow(String label, String url) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 90,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: EchoSightTheme.textSecondary.withOpacity(0.7),
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+        Expanded(
+          child: GestureDetector(
+            onTap: () {
+              _serverUrlController.text = url;
+            },
+            child: Text(
+              url,
+              style: TextStyle(
+                color: EchoSightTheme.primary.withOpacity(0.8),
+                fontSize: 12,
+                fontFamily: 'monospace',
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -236,9 +429,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         onSubmitted: (url) {
           final ws = context.read<WebSocketService>();
-          ws.disconnect();
           ws.setServerUrl(url.trim());
-          ws.connect();
+          ws.retryConnection();
         },
       ),
     );
@@ -260,10 +452,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final ws = context.read<WebSocketService>();
     final camera = context.read<CameraService>();
     
-    // Parse WS URL to HTTP. e.g. ws://10.0.2.2:8000/ws/chat -> http://10.0.2.2:8000/api/add-face
-    String baseUrl = ws.serverUrl.replaceFirst('ws://', 'http://').replaceFirst('wss://', 'https://');
-    baseUrl = baseUrl.split('/ws/')[0];
-    print(baseUrl);
+    // Use the httpBaseUrl helper from WebSocketService
+    final baseUrl = ws.httpBaseUrl;
+    debugPrint('Add face API base: $baseUrl');
 
     showDialog(
       context: context,

@@ -12,6 +12,10 @@ import 'services/ocr_service.dart';
 import 'services/speech_service.dart';
 import 'services/tts_service.dart';
 import 'services/websocket_service.dart';
+import 'services/location_service.dart';
+import 'services/navigation_service.dart';
+import 'services/emergency_service.dart';
+import 'services/surroundings_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -40,6 +44,7 @@ Future<void> _requestPermissions() async {
     Permission.camera,
     Permission.microphone,
     Permission.speech,
+    Permission.location,
   ].request();
 }
 
@@ -57,6 +62,27 @@ class EchoSightApp extends StatelessWidget {
         ChangeNotifierProvider(create: (_) => SpeechService()),
         ChangeNotifierProvider(create: (_) => TtsService()),
         ChangeNotifierProvider(create: (_) => WebSocketService()),
+        ChangeNotifierProvider(create: (_) => LocationService()),
+
+        // Proactive surroundings / sight — delta scans + scene memory
+        ChangeNotifierProxyProvider6<
+            CameraService,
+            DetectionService,
+            OcrService,
+            WebSocketService,
+            TtsService,
+            LocationService,
+            SurroundingsService>(
+          create: (context) => SurroundingsService(
+            cameraService: context.read<CameraService>(),
+            detectionService: context.read<DetectionService>(),
+            ocrService: context.read<OcrService>(),
+            webSocketService: context.read<WebSocketService>(),
+            ttsService: context.read<TtsService>(),
+            locationService: context.read<LocationService>(),
+          ),
+          update: (_, a, b, c, d, e, f, previous) => previous!,
+        ),
 
         // Fusion engine — depends on all services
         ChangeNotifierProxyProvider6<
@@ -74,9 +100,44 @@ class EchoSightApp extends StatelessWidget {
             webSocketService: context.read<WebSocketService>(),
             speechService: context.read<SpeechService>(),
             ttsService: context.read<TtsService>(),
+            surroundingsService: context.read<SurroundingsService>(),
           ),
           update: (_, camera, detection, ocr, ws, speech, tts, previous) =>
               previous!,
+        ),
+
+        // Navigation service
+        ChangeNotifierProxyProvider3<
+            LocationService,
+            WebSocketService,
+            TtsService,
+            NavigationService>(
+          create: (context) => NavigationService(
+            locationService: context.read<LocationService>(),
+            webSocketService: context.read<WebSocketService>(),
+            ttsService: context.read<TtsService>(),
+          ),
+          update: (_, loc, ws, tts, previous) => previous!,
+        ),
+
+        // Emergency service
+        ChangeNotifierProxyProvider6<
+            CameraService,
+            TtsService,
+            LocationService,
+            WebSocketService,
+            DetectionService,
+            OcrService,
+            EmergencyService>(
+          create: (context) => EmergencyService(
+            cameraService: context.read<CameraService>(),
+            ttsService: context.read<TtsService>(),
+            locationService: context.read<LocationService>(),
+            webSocketService: context.read<WebSocketService>(),
+            detectionService: context.read<DetectionService>(),
+            ocrService: context.read<OcrService>(),
+          ),
+          update: (_, camera, tts, loc, ws, det, ocr, previous) => previous!,
         ),
       ],
       child: MaterialApp(

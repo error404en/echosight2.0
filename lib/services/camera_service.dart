@@ -6,14 +6,18 @@ import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
 
 /// Camera service for real-time frame capture.
+/// Uses a single capture for both API and on-device processing to avoid
+/// repeated autofocus triggers.
 class CameraService extends ChangeNotifier {
   CameraController? _controller;
   List<CameraDescription> _cameras = [];
   bool _isInitialized = false;
   bool _isCapturing = false;
   CameraLensDirection _currentDirection = CameraLensDirection.back;
-  
-  // Smart FPS Limiter
+
+  // Cached last capture — avoids double takePicture()
+  Uint8List? _lastRawFrame;
+  String? _lastBase64Frame;
   DateTime _lastCaptureTime = DateTime.fromMillisecondsSinceEpoch(0);
   static const int _minMsBetweenFrames = 500; // ~2 FPS max for battery savings
 
@@ -46,6 +50,14 @@ class CameraService extends ChangeNotifier {
       );
 
       await _controller!.initialize();
+
+      // Lock focus mode to avoid repeated autofocus on each capture
+      try {
+        await _controller!.setFocusMode(FocusMode.auto);
+      } catch (e) {
+        debugPrint('⚠️ Could not set focus mode: $e');
+      }
+
       _isInitialized = true;
       notifyListeners();
       debugPrint('✅ Camera initialized');
@@ -77,22 +89,28 @@ class CameraService extends ChangeNotifier {
     _currentDirection = _currentDirection == CameraLensDirection.back
         ? CameraLensDirection.front
         : CameraLensDirection.back;
-        
+
     _isInitialized = false;
     await _controller?.dispose();
     _controller = null;
+    _lastRawFrame = null;
+    _lastBase64Frame = null;
     notifyListeners();
-    
+
     await initialize();
   }
 
-  /// Capture a single frame as base64 JPEG.
-  Future<String?> captureFrame() async {
-    if (!_isInitialized || _controller == null || _isCapturing) return null;
+  /// Take a single picture and cache both raw + base64 results.
+  /// Subsequent calls to captureFrame() and captureRawFrame() within
+  /// the throttle window will reuse this cached data instead of
+  /// triggering another autofocus cycle.
+  Future<bool> _captureOnce() async {
+    if (!_isInitialized || _controller == null || _isCapturing) return false;
 
     final now = DateTime.now();
     if (now.difference(_lastCaptureTime).inMilliseconds < _minMsBetweenFrames) {
-      return null; // Throttle to save battery
+      // Use cached frame if within throttle window
+      return _lastRawFrame != null;
     }
 
     try {
@@ -100,35 +118,39 @@ class CameraService extends ChangeNotifier {
       final XFile file = await _controller!.takePicture();
       final bytes = await file.readAsBytes();
 
-      // Resize for sending to API (reduce bandwidth)
+      // Cache both raw and resized
+      _lastRawFrame = bytes;
       final resized = await compute(_resizeImage, bytes);
-      final base64Image = base64Encode(resized);
+      _lastBase64Frame = base64Encode(resized);
 
-      _isCapturing = false;
       _lastCaptureTime = DateTime.now();
-      return base64Image;
+      _isCapturing = false;
+      return true;
     } catch (e) {
       debugPrint('❌ Frame capture failed: $e');
       _isCapturing = false;
-      return null;
+      return false;
     }
   }
 
-  /// Capture raw bytes for on-device processing (YOLO/OCR).
-  Future<Uint8List?> captureRawFrame() async {
-    if (!_isInitialized || _controller == null || _isCapturing) return null;
+  /// Capture a single frame as base64 JPEG (for sending to the Groq vision API).
+  Future<String?> captureFrame() async {
+    final ok = await _captureOnce();
+    return ok ? _lastBase64Frame : null;
+  }
 
-    try {
-      _isCapturing = true;
-      final XFile file = await _controller!.takePicture();
-      final bytes = await file.readAsBytes();
-      _isCapturing = false;
-      return bytes;
-    } catch (e) {
-      debugPrint('❌ Raw frame capture failed: $e');
-      _isCapturing = false;
-      return null;
-    }
+  /// Capture raw bytes for on-device processing (YOLO/OCR).
+  /// Reuses the same capture as captureFrame() — no double autofocus.
+  Future<Uint8List?> captureRawFrame() async {
+    final ok = await _captureOnce();
+    return ok ? _lastRawFrame : null;
+  }
+
+  /// Force a fresh capture (invalidates cache).
+  void invalidateCache() {
+    _lastRawFrame = null;
+    _lastBase64Frame = null;
+    _lastCaptureTime = DateTime.fromMillisecondsSinceEpoch(0);
   }
 
   /// Resize image in an isolate to keep UI smooth.
