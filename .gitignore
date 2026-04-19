@@ -47,3 +47,7 @@ app.*.map.json
 # Environment variables
 .env
 backend/.env
+
+# Flutter SDK folder
+flutter_windows_*/
+flutter_windows_3.41.6-stable/
