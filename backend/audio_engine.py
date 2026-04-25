@@ -53,7 +53,7 @@ async def stream_tts(text: str, voice: str = "en-US-JennyNeural", rate: str = "+
         communicate = edge_tts.Communicate(text, voice, rate=rate)
         
         chunk_buffer = bytearray()
-        chunk_threshold = 32768 # 32KB
+        chunk_threshold = 131072 # 128KB — larger chunks reduce client-side audio gaps
         
         # Collect and stream chunks without waiting for the whole file
         async for chunk in communicate.stream():

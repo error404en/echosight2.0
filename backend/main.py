@@ -267,8 +267,8 @@ async def websocket_chat(websocket: WebSocket):
                 await websocket.send_text("[ERROR] Empty query")
                 continue
 
-            # 2. Extract specific identities from the image
-            if image_b64:
+            # 2. Extract specific identities from the image (skip for chat mode — no image)
+            if image_b64 and mode != "chat":
                 detected_names = detect_known_faces(image_b64)
                 if detected_names:
                     if not vision_context:
@@ -302,7 +302,7 @@ async def websocket_chat(websocket: WebSocket):
 
             # ─── Surroundings scene memory injection ─────────────
             scene_memory = data.get("scene_memory", "")
-            if mode in ("surroundings", "sight") and scene_memory:
+            if mode in ("surroundings", "sight", "auto") and scene_memory:
                 if not vision_context:
                     vision_context = {}
                 vision_context["scene_memory"] = scene_memory
@@ -324,14 +324,15 @@ async def websocket_chat(websocket: WebSocket):
                 full_response.append(chunk)
                 await websocket.send_text(chunk)
 
-            # Save full response to conversation memory
+            # Save full response to conversation memory (skip errors/rate limits)
             complete_response = "".join(full_response)
-            session.add_assistant_message(complete_response)
+            if complete_response and not complete_response.startswith("[ERROR]") and complete_response != "[RATE_LIMIT]":
+                session.add_assistant_message(complete_response)
 
             # For surroundings mode: send scene memory back to Flutter
             # and skip TTS if "no changes"
             is_no_change = (
-                mode in ("surroundings", "sight") and
+                mode in ("surroundings", "sight", "auto") and
                 complete_response.strip().lower().replace(".", "") in
                 ["no changes", "no change", "nothing changed"]
             )
@@ -340,7 +341,7 @@ async def websocket_chat(websocket: WebSocket):
                 await websocket.send_text("[SCENE_UNCHANGED]")
             else:
                 # Send scene memory update back to Flutter
-                if mode in ("surroundings", "sight"):
+                if mode in ("surroundings", "sight", "auto"):
                     await websocket.send_text(f"[SCENE_MEMORY] {complete_response}")
 
                 # Stream Edge-TTS audio back to Flutter
