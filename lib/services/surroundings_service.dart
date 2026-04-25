@@ -139,7 +139,7 @@ class SurroundingsService extends ChangeNotifier {
   /// Start the continuous surroundings / sight scan loop.
   /// [backendMode] must be `surroundings` or `sight` (matches backend `mode`).
   void activate({String backendMode = 'surroundings'}) {
-    assert(backendMode == 'surroundings' || backendMode == 'sight');
+    assert(backendMode == 'surroundings' || backendMode == 'sight' || backendMode == 'auto');
     if (_isActive) return;
 
     _backendWsMode = backendMode;
@@ -154,8 +154,11 @@ class SurroundingsService extends ChangeNotifier {
     final intro = backendMode == 'sight'
         ? 'Sight stream active. Describing your surroundings like clear vision. '
             'Say pause to mute, or switch modes to stop.'
-        : 'Surroundings mode active. I am now your eyes. '
-            'Say pause to mute, or switch modes to stop.';
+        : backendMode == 'auto'
+            ? 'Auto intelligence active. I will continuously monitor for safety, text, and surroundings. '
+                'Say pause to mute, or switch modes to stop.'
+            : 'Surroundings mode active. I am now your eyes. '
+                'Say pause to mute, or switch modes to stop.';
     ttsService.speak(intro);
 
     _startScanLoop();
@@ -163,7 +166,7 @@ class SurroundingsService extends ChangeNotifier {
 
   /// Switch between surroundings and sight without clearing scene memory.
   void setBackendMode(String backendMode) {
-    assert(backendMode == 'surroundings' || backendMode == 'sight');
+    assert(backendMode == 'surroundings' || backendMode == 'sight' || backendMode == 'auto');
     if (_backendWsMode == backendMode) return;
     _backendWsMode = backendMode;
     notifyListeners();
@@ -288,7 +291,9 @@ class SurroundingsService extends ChangeNotifier {
   /// Build the delta-aware query that tells the vision model what was already described.
   String _buildDeltaQuery({String mode = 'surroundings'}) {
     final buf = StringBuffer();
-    final label = mode == 'sight' ? 'SIGHT SCAN' : 'SURROUNDINGS SCAN';
+    final label = mode == 'sight' ? 'SIGHT SCAN' 
+        : mode == 'auto' ? 'AUTO SCAN' 
+        : 'SURROUNDINGS SCAN';
     buf.write('$label #$_scanCount. ');
 
     if (_lastSceneDescription.isEmpty) {

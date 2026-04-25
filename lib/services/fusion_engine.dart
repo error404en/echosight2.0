@@ -45,6 +45,7 @@ class FusionEngine extends ChangeNotifier {
   bool _surroundingsScanInFlight = false;
   Timer? _heartbeatTimer;
   Timer? _stateTimeoutTimer;
+  Timer? _speakingWatchdog;
   DateTime _lastVoiceInputTime = DateTime.fromMillisecondsSinceEpoch(0);
 
 
@@ -87,7 +88,7 @@ class FusionEngine extends ChangeNotifier {
   }
 
   static bool _isProactiveMode(AssistantMode m) =>
-      m == AssistantMode.surroundings || m == AssistantMode.sight;
+      m == AssistantMode.surroundings || m == AssistantMode.sight || m == AssistantMode.auto;
 
   void setMode(AssistantMode newMode) {
     if (_currentMode == newMode) return;
@@ -101,11 +102,21 @@ class FusionEngine extends ChangeNotifier {
     notifyListeners();
 
     if (willProactive) {
-      final bm = newMode == AssistantMode.sight ? 'sight' : 'surroundings';
-      if (!surroundingsService.isActive) {
-        surroundingsService.activate(backendMode: bm);
+      if (newMode == AssistantMode.auto) {
+        // Auto mode uses its own proactive scan loop — not the surroundings service
+        // but we do activate surroundings service to reuse its timer/scan infrastructure
+        if (!surroundingsService.isActive) {
+          surroundingsService.activate(backendMode: 'auto');
+        } else {
+          surroundingsService.setBackendMode('auto');
+        }
       } else {
-        surroundingsService.setBackendMode(bm);
+        final bm = newMode == AssistantMode.sight ? 'sight' : 'surroundings';
+        if (!surroundingsService.isActive) {
+          surroundingsService.activate(backendMode: bm);
+        } else {
+          surroundingsService.setBackendMode(bm);
+        }
       }
       return;
     }
@@ -127,6 +138,11 @@ class FusionEngine extends ChangeNotifier {
     }
 
     ttsService.speak('${newMode.name} mode. ${newMode.description}.');
+
+    // Chat mode — just announce and wait for user speech (no camera needed)
+    if (newMode == AssistantMode.chat) {
+      return;
+    }
 
     // Auto-trigger immediate actions for interactive modes
     if (newMode == AssistantMode.reader) {
@@ -210,63 +226,170 @@ class FusionEngine extends ChangeNotifier {
     };
   }
 
+  /// Normalize spoken text: strip punctuation, STT artifacts, filler words,
+  /// and collapse whitespace so voice commands match naturally.
+  static String _normalizeQuery(String raw) {
+    var q = raw.toLowerCase().trim();
+
+    // Remove common STT punctuation artifacts
+    q = q.replaceAll(RegExp(r'[^a-z0-9\s]'), ' ');
+
+    // Remove spoken-out punctuation / symbols that STT sometimes transcribes literally
+    final spokenSymbols = [
+      'hashtag', 'hash', 'pound sign', 'at sign', 'ampersand',
+      'exclamation mark', 'question mark', 'period', 'comma',
+      'full stop', 'dot', 'colon', 'semicolon', 'dash',
+    ];
+    for (final sym in spokenSymbols) {
+      q = q.replaceAll(sym, ' ');
+    }
+
+    // Remove common filler words that STT captures but add no intent
+    final fillers = [
+      'um', 'uh', 'uhh', 'umm', 'hmm', 'hm', 'er', 'ah', 'ahh',
+      'like', 'you know', 'basically', 'actually', 'so', 'well',
+      'okay', 'ok', 'right', 'yeah', 'yep', 'alright',
+      'please', 'kindly', 'can you', 'could you', 'would you',
+      'i want to', 'i wanna', 'i would like to', 'i need to',
+      'hey', 'hi', 'hello', 'yo',
+    ];
+    for (final f in fillers) {
+      // Use word boundaries to avoid removing parts of real words
+      q = q.replaceAll(RegExp('\\b${RegExp.escape(f)}\\b'), ' ');
+    }
+
+    // Collapse whitespace
+    q = q.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return q;
+  }
+
+  /// Check if normalized query contains ANY of the trigger phrases.
+  static bool _matchesAny(String q, List<String> triggers) {
+    return triggers.any((t) => q.contains(t));
+  }
+
   /// Process voice commands that work globally across all modes.
+  /// Uses normalized text and natural language triggers for seamless voice UX.
   /// Returns true if the command was handled.
   bool _tryGlobalVoiceCommand(String query) {
-    final q = query.toLowerCase().trim();
-    
-    // Navigation commands — directly navigate instead of just speaking
-    if (q.contains('navigate to') || q.contains('take me to') || q.contains('start navigation')) {
-       setMode(AssistantMode.navigate);
-       return true;
+    final q = _normalizeQuery(query);
+    // Keep raw lowercase for exact-match fallbacks
+    final raw = query.toLowerCase().trim();
+
+    // ── Navigation ──────────────────────────────────────
+    if (_matchesAny(q, [
+      'navigate to', 'take me to', 'start navigation',
+      'give me directions', 'how do i get to', 'walk me to',
+      'guide me to', 'directions to', 'i need to go to',
+      'navigation mode', 'go to',
+    ])) {
+      setMode(AssistantMode.navigate);
+      return true;
     }
 
-    // Emergency commands
-    if (q.contains('emergency') || q.contains('help me') || q.contains('sos')) {
-       setMode(AssistantMode.emergency);
-       return true;
+    // ── Emergency ────────────────────────────────────────
+    if (_matchesAny(q, [
+      'emergency', 'help me', 'sos', 'i m in danger',
+      'i am in danger', 'call for help', 'danger',
+      'save me', 'i m lost', 'i am lost', 'panic',
+      'i m scared', 'i am scared', 'emergency mode',
+    ])) {
+      setMode(AssistantMode.emergency);
+      return true;
     }
 
-    // Reading commands
-    if (q.contains('read this') || q.contains('what does it say') || q.contains('read that')) {
-       setMode(AssistantMode.reader);
-       return true;
+    // ── Reader ───────────────────────────────────────────
+    if (_matchesAny(q, [
+      'read this', 'read that', 'what does it say',
+      'read the text', 'read the sign', 'read out loud',
+      'read for me', 'what is written', 'whats written',
+      'read the label', 'read the screen', 'read the menu',
+      'read mode', 'reader mode', 'read it',
+    ])) {
+      setMode(AssistantMode.reader);
+      return true;
     }
 
-    // Surroundings mode commands
-    if (q.contains('surroundings') || q.contains('scan around') || q.contains('what is around me')) {
-       setMode(AssistantMode.surroundings);
-       return true;
+    // ── Surroundings ─────────────────────────────────────
+    if (_matchesAny(q, [
+      'surroundings', 'scan around', 'what is around me',
+      'whats around me', 'look around', 'look around for me',
+      'scan my surroundings', 'describe my surroundings',
+      'surroundings mode', 'tell me what is around',
+      'what do you see around', 'scan the area',
+      'describe the area', 'what is nearby',
+    ])) {
+      setMode(AssistantMode.surroundings);
+      return true;
     }
 
-    // Sight mode commands
-    if (q.contains('sight mode') || q.contains('be my eyes') || q.contains('sight stream')) {
-       setMode(AssistantMode.sight);
-       return true;
+    // ── Sight ────────────────────────────────────────────
+    if (_matchesAny(q, [
+      'sight mode', 'be my eyes', 'sight stream',
+      'see for me', 'i want to see', 'show me everything',
+      'full vision', 'vision mode', 'detailed sight',
+      'act as my eyes', 'become my eyes', 'lend me your eyes',
+    ])) {
+      setMode(AssistantMode.sight);
+      return true;
     }
 
-    // Identify mode commands
-    if (q.contains('identify') || q.contains('what is this') || q.contains('describe this')) {
-       setMode(AssistantMode.identify);
-       return true;
+    // ── Identify ─────────────────────────────────────────
+    if (_matchesAny(q, [
+      'identify', 'what is this', 'describe this',
+      'what am i holding', 'what is in front of me',
+      'tell me about this', 'what is that',
+      'identify this', 'identify mode', 'recognize this',
+      'what am i looking at', 'what do you see here',
+    ])) {
+      setMode(AssistantMode.identify);
+      return true;
     }
 
-    // Assistant mode commands
-    if (q.contains('assistant mode') || q.contains('general mode') || q.contains('normal mode')) {
-       setMode(AssistantMode.assistant);
-       return true;
+    // ── Auto ─────────────────────────────────────────────
+    if (_matchesAny(q, [
+      'auto mode', 'automatic mode', 'smart mode',
+      'switch to auto', 'go automatic', 'be smart',
+      'auto intelligence', 'intelligent mode',
+    ])) {
+      setMode(AssistantMode.auto);
+      return true;
     }
 
-    // Pause/resume surroundings
-    if (q.contains('pause') || q.contains('quiet') || q.contains('mute')) {
+    // ── Assistant ─────────────────────────────────────────
+    if (_matchesAny(q, [
+      'assistant mode', 'general mode', 'normal mode',
+      'default mode', 'regular mode', 'standard mode',
+      'go back to normal', 'back to assistant',
+      'switch to assistant',
+    ])) {
+      setMode(AssistantMode.assistant);
+      return true;
+    }
+
+    // ── Chat ─────────────────────────────────────────────
+    if (_matchesAny(q, [
+      'chat mode', 'lets chat', 'just talk', 'voice chat',
+      'talk to me', 'chat with me', 'have a conversation',
+      'general chat', 'free talk', 'conversation mode',
+      'talk mode', 'i want to talk', 'lets have a chat',
+      'chitchat', 'chit chat', 'just chatting',
+    ])) {
+      setMode(AssistantMode.chat);
+      return true;
+    }
+
+    // ── Pause / Resume / Stop (utility) ──────────────────
+    if (_matchesAny(q, ['pause', 'quiet', 'mute', 'shh', 'hush', 'silence', 'hold on', 'wait'])) {
       if (surroundingsService.isActive) {
         surroundingsService.pause();
       } else {
-        ttsService.speak('No active scan to pause.');
+        ttsService.stop();
       }
       return true;
     }
-    if (q.contains('resume') || q == 'continue' || q.contains('unmute')) {
+
+    if (_matchesAny(q, ['resume', 'continue', 'unmute', 'go on', 'keep going', 'carry on', 'start again'])) {
       if (surroundingsService.isActive) {
         surroundingsService.resume();
       } else {
@@ -275,8 +398,9 @@ class FusionEngine extends ChangeNotifier {
       return true;
     }
 
-    // Stop everything
-    if (q == 'stop' || q == 'shut up' || q == 'be quiet') {
+    if (q == 'stop' || q == 'shut up' || q == 'be quiet' ||
+        raw == 'stop' || raw == 'shut up' || raw == 'be quiet' ||
+        q == 'enough' || q == 'thats enough') {
       ttsService.stop();
       if (surroundingsService.isActive) surroundingsService.pause();
       return true;
@@ -312,11 +436,14 @@ class FusionEngine extends ChangeNotifier {
 
     // When TTS finishes speaking
     ttsService.onSpeakingComplete = () {
+      _speakingWatchdog?.cancel();
       if (_continuousMode) {
         // Auto-restart listening in continuous mode
-        Future.delayed(const Duration(milliseconds: 500), () {
-          if (_state == AssistantState.speaking) {
-            _setState(AssistantState.idle);
+        _streamingResponse = '';
+        _currentCaption = '';
+        _setState(AssistantState.idle);
+        Future.delayed(const Duration(milliseconds: 300), () {
+          if (_state == AssistantState.idle) {
             startListening();
           }
         });
@@ -367,6 +494,15 @@ class FusionEngine extends ChangeNotifier {
             'Tap anywhere to speak. '
             'Swipe left or right to change modes.',
           );
+          // Auto mode is the default — activate its proactive scan now that
+          // all services are initialized and WebSocket is connected.
+          if (_currentMode == AssistantMode.auto) {
+            Future.delayed(const Duration(seconds: 5), () {
+              if (_currentMode == AssistantMode.auto && !surroundingsService.isActive) {
+                surroundingsService.activate(backendMode: 'auto');
+              }
+            });
+          }
         } else {
           ttsService.speak(
             'EchoSight is running in offline mode. '
@@ -453,8 +589,28 @@ class FusionEngine extends ChangeNotifier {
       _addMessage(ChatMessage(
         content: query,
         role: MessageRole.user,
-        hasVisionContext: true,
+        hasVisionContext: _currentMode != AssistantMode.chat,
       ));
+    }
+
+    // ── CHAT MODE: skip camera entirely for faster general conversations ──
+    if (_currentMode == AssistantMode.chat) {
+      if (!webSocketService.isConnected) {
+        _handleOfflineResponse(query ?? '', null);
+        return;
+      }
+
+      _streamingResponse = '';
+      webSocketService.sendMessage(
+        sessionId: _sessionId,
+        query: query,
+        audioBase64: audioBase64,
+        mode: 'chat',
+        voice: ttsService.cloudVoiceName,
+        ttsRate: ttsService.cloudTtsRate,
+      );
+      _setState(AssistantState.thinking);
+      return;
     }
 
     // 1. Capture current camera frame for context
@@ -534,11 +690,24 @@ class FusionEngine extends ChangeNotifier {
       // Clear the user caption since we're done processing
       _currentCaption = '';
 
-      // CRITICAL FIX: If TTS has already finished playing all audio chunks
-      // before [DONE] arrived, go straight to idle. Otherwise the app gets
-      // permanently stuck in 'speaking' state with no callback to rescue it.
+      // If TTS is still playing audio chunks, transition to speaking and
+      // start a watchdog timer. The onSpeakingComplete callback will move
+      // us to idle when playback finishes. The watchdog catches the race
+      // condition where TTS finishes between the isSpeaking check and
+      // the callback registration.
       if (ttsService.isSpeaking) {
         _setState(AssistantState.speaking);
+        // Watchdog: if onSpeakingComplete never fires (race condition),
+        // recover to idle after 2 seconds of no audio activity.
+        _speakingWatchdog?.cancel();
+        _speakingWatchdog = Timer(const Duration(seconds: 2), () {
+          if (_state == AssistantState.speaking && !ttsService.isSpeaking) {
+            debugPrint('🔧 Speaking watchdog: TTS finished but callback missed, recovering');
+            _streamingResponse = '';
+            _currentCaption = '';
+            _setState(AssistantState.idle);
+          }
+        });
       } else {
         _streamingResponse = '';
         _setState(AssistantState.idle);
@@ -581,7 +750,7 @@ class FusionEngine extends ChangeNotifier {
       _addMessage(ChatMessage(
         content: transcript,
         role: MessageRole.user,
-        hasVisionContext: true,
+        hasVisionContext: _currentMode != AssistantMode.chat,
       ));
       notifyListeners();
       return;
@@ -639,23 +808,23 @@ class FusionEngine extends ChangeNotifier {
     _setState(AssistantState.processing);
 
     try {
-      final rawFrame = await cameraService.captureRawFrame();
-      if (rawFrame != null) {
-        // Save frame to temp file for OCR
-        final imageBase64 = await cameraService.captureFrame();
+      cameraService.invalidateCache();
+      final imageBase64 = await cameraService.captureFrame();
 
-        if (webSocketService.isConnected && imageBase64 != null) {
-          webSocketService.sendMessage(
-            sessionId: _sessionId,
-            query: 'Please read all the text visible in this image aloud. Organize it clearly.',
-            imageBase64: imageBase64,
-            mode: 'reader',
-          );
-          _setState(AssistantState.thinking);
-        } else {
-          ttsService.speak('I need a server connection to read text for you right now.');
-          _setState(AssistantState.speaking);
-        }
+      if (webSocketService.isConnected && imageBase64 != null) {
+        _streamingResponse = '';
+        webSocketService.sendMessage(
+          sessionId: _sessionId,
+          query: 'Please read all the text visible in this image aloud. Organize it clearly.',
+          imageBase64: imageBase64,
+          mode: 'reader',
+          voice: ttsService.cloudVoiceName,
+          ttsRate: ttsService.cloudTtsRate,
+        );
+        _setState(AssistantState.thinking);
+      } else {
+        ttsService.speak('I need a server connection to read text for you right now.');
+        _setState(AssistantState.speaking);
       }
     } catch (e) {
       ttsService.speak('Sorry, I could not capture the image to read.');
@@ -710,9 +879,11 @@ class FusionEngine extends ChangeNotifier {
 
     // Safety timeout: if the app stays in a non-idle state for too long,
     // auto-recover to idle to prevent the app from going permanently silent.
+    // 60s is generous enough for long vision+TTS responses but still catches
+    // genuine stuck states.
     _stateTimeoutTimer?.cancel();
     if (newState != AssistantState.idle) {
-      _stateTimeoutTimer = Timer(const Duration(seconds: 30), () {
+      _stateTimeoutTimer = Timer(const Duration(seconds: 60), () {
         if (_state != AssistantState.idle && !ttsService.isSpeaking) {
           debugPrint('⚠️ State timeout: stuck in $_state, recovering to idle');
           _streamingResponse = '';
@@ -749,6 +920,7 @@ class FusionEngine extends ChangeNotifier {
     _responseSubscription?.cancel();
     _heartbeatTimer?.cancel();
     _stateTimeoutTimer?.cancel();
+    _speakingWatchdog?.cancel();
     super.dispose();
   }
 }

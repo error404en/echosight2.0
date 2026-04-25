@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 enum AssistantMode {
   auto,
   assistant,
+  chat,
   surroundings,
   sight,
   navigate,
@@ -18,6 +19,8 @@ extension AssistantModeExtension on AssistantMode {
         return 'Auto';
       case AssistantMode.assistant:
         return 'Assistant';
+      case AssistantMode.chat:
+        return 'Chat';
       case AssistantMode.surroundings:
         return 'Surroundings';
       case AssistantMode.sight:
@@ -39,6 +42,8 @@ extension AssistantModeExtension on AssistantMode {
         return Icons.auto_awesome;
       case AssistantMode.assistant:
         return Icons.smart_toy_outlined;
+      case AssistantMode.chat:
+        return Icons.chat_outlined;
       case AssistantMode.surroundings:
         return Icons.visibility;
       case AssistantMode.sight:
@@ -60,6 +65,8 @@ extension AssistantModeExtension on AssistantMode {
         return Colors.tealAccent;
       case AssistantMode.assistant:
         return Colors.blueAccent;
+      case AssistantMode.chat:
+        return Colors.deepPurpleAccent;
       case AssistantMode.surroundings:
         return Colors.cyanAccent;
       case AssistantMode.sight:
@@ -81,6 +88,8 @@ extension AssistantModeExtension on AssistantMode {
         return 'Automatically prioritizes safety, reading, and scene detailing';
       case AssistantMode.assistant:
         return 'Ask me anything about what\'s in front of you';
+      case AssistantMode.chat:
+        return 'Talk to me about anything — no camera needed';
       case AssistantMode.surroundings:
         return 'I continuously scan and tell you what changes around you';
       case AssistantMode.sight:

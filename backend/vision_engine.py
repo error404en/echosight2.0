@@ -99,7 +99,10 @@ async def analyze_with_groq(
         return
 
     lowercase_query = query.lower()
-    if "help" in lowercase_query or "emergency" in lowercase_query:
+    # Only override to emergency mode if the user explicitly signals distress.
+    # Avoid false triggers on casual uses like "help me understand this sign".
+    emergency_phrases = ["help me please", "i need help", "emergency", "call 911", "i'm in danger", "i am in danger"]
+    if any(phrase in lowercase_query for phrase in emergency_phrases):
         system_prompt = (
             "YOU ARE IN STRICT EMERGENCY MODE. IGNORE CONVERSATIONAL PLEASANTRIES. "
             "EVALUATE THE IMMEDIATELY VISUALIZED SURROUNDINGS FOR CRITICAL DANGERS, "
