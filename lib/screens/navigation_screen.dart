@@ -262,6 +262,21 @@ class _NavigationScreenState extends State<NavigationScreen> {
           ),
           const SizedBox(height: 16),
 
+          // Static Map Preview
+          if (!isArrived && nav.staticMapUrl.isNotEmpty) ...[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: Image.network(
+                nav.staticMapUrl,
+                height: 120,
+                width: double.infinity,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) => const SizedBox(),
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
+
           // Progress bar
           if (!isArrived && nav.totalSteps > 0) ...[
             ClipRRect(
@@ -343,6 +358,60 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
           const SizedBox(height: 16),
 
+          // Action buttons: Repeat and Scan
+          if (!isArrived)
+            Row(
+              children: [
+                Expanded(
+                  child: SizedBox(
+                    height: 56,
+                    child: ElevatedButton.icon(
+                      onPressed: () {
+                        HapticFeedback.lightImpact();
+                        nav.repeatCurrentInstruction();
+                      },
+                      icon: const Icon(Icons.replay),
+                      label: const Text('Repeat', style: TextStyle(fontSize: 16)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blueAccent.withOpacity(0.15),
+                        foregroundColor: Colors.blueAccent,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          side: BorderSide(color: Colors.blueAccent.withOpacity(0.5)),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: SizedBox(
+                    height: 56,
+                    child: ElevatedButton.icon(
+                      onPressed: () {
+                        HapticFeedback.lightImpact();
+                        final fusion = context.read<FusionEngine>();
+                        fusion.runProactiveSurroundingsScan();
+                        context.read<TtsService>().speak('Scanning surroundings.');
+                      },
+                      icon: const Icon(Icons.radar),
+                      label: const Text('Scan', style: TextStyle(fontSize: 16)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.cyanAccent.withOpacity(0.15),
+                        foregroundColor: Colors.cyanAccent,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          side: BorderSide(color: Colors.cyanAccent.withOpacity(0.5)),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+
+          const SizedBox(height: 16),
+
           // Stop / Done button
           SizedBox(
             width: double.infinity,
@@ -391,26 +460,34 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
   void _handleVoiceDestination(BuildContext context) async {
     final speech = context.read<SpeechService>();
+    final nav = context.read<NavigationService>();
+    final fusion = context.read<FusionEngine>();
+    
     if (_isVoiceInputActive) {
       await speech.stopListening();
       setState(() => _isVoiceInputActive = false);
     } else {
       HapticFeedback.mediumImpact();
+      await context.read<TtsService>().stop();
       context.read<TtsService>().speak('Say your destination.');
       await Future.delayed(const Duration(milliseconds: 1500));
 
       // Temporarily override the text result callback
       final originalCallback = speech.onTextResult;
       speech.onTextResult = (text) {
+        // Always restore original callback
+        speech.onTextResult = originalCallback;
+        setState(() => _isVoiceInputActive = false);
+        
         if (text.isNotEmpty && text != 'Listening...') {
           setState(() {
             _destController.text = text;
-            _isVoiceInputActive = false;
           });
-          context.read<TtsService>().speak('Destination set to $text. Tap Start Walking to begin.');
+          // Auto-start navigation
+          nav.startNavigation(text, fusion.sessionId);
+        } else {
+          context.read<TtsService>().speak('Did not hear a destination. Cancelled.');
         }
-        // Restore original callback
-        speech.onTextResult = originalCallback;
       };
 
       setState(() => _isVoiceInputActive = true);

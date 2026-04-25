@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../services/emergency_service.dart';
 import '../services/fusion_engine.dart';
+import '../services/tts_service.dart';
 
 /// Full-screen emergency mode with large panic button,
 /// continuous scanning status, and SOS trigger.
@@ -10,6 +11,76 @@ import '../services/fusion_engine.dart';
 /// and use this under extreme stress.
 class EmergencyScreen extends StatelessWidget {
   const EmergencyScreen({super.key});
+
+  void _showContactsDialog(BuildContext context) {
+    final emergency = context.read<EmergencyService>();
+    final tts = context.read<TtsService>();
+    final nameController = TextEditingController();
+    final phoneController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setStateDialog) => AlertDialog(
+          backgroundColor: const Color(0xFF1A1F38),
+          title: const Text('Emergency Contacts', style: TextStyle(color: Colors.white)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ...emergency.emergencyContacts.asMap().entries.map((e) => ListTile(
+                title: Text(e.value['name']!, style: const TextStyle(color: Colors.white)),
+                subtitle: Text(e.value['phone']!, style: const TextStyle(color: Colors.white70)),
+                trailing: IconButton(
+                  icon: const Icon(Icons.delete, color: Colors.redAccent),
+                  onPressed: () {
+                    emergency.removeContact(e.key);
+                    setStateDialog(() {});
+                  },
+                ),
+              )),
+              if (emergency.emergencyContacts.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(8.0),
+                  child: Text('No contacts added yet.', style: TextStyle(color: Colors.white54)),
+                ),
+              const Divider(color: Colors.white24),
+              TextField(
+                controller: nameController,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(labelText: 'Name', labelStyle: TextStyle(color: Colors.white54)),
+              ),
+              TextField(
+                controller: phoneController,
+                style: const TextStyle(color: Colors.white),
+                keyboardType: TextInputType.phone,
+                decoration: const InputDecoration(labelText: 'Phone', labelStyle: TextStyle(color: Colors.white54)),
+              ),
+              const SizedBox(height: 10),
+              ElevatedButton.icon(
+                onPressed: () {
+                  if (nameController.text.isNotEmpty && phoneController.text.isNotEmpty) {
+                    emergency.saveContact(nameController.text, phoneController.text);
+                    nameController.clear();
+                    phoneController.clear();
+                    setStateDialog(() {});
+                    tts.speak('Contact added.');
+                  }
+                },
+                icon: const Icon(Icons.add),
+                label: const Text('Add Contact'),
+              )
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Close'),
+            )
+          ],
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -28,6 +99,13 @@ class EmergencyScreen extends StatelessWidget {
                 Navigator.pop(context);
               },
             ),
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.contacts),
+                tooltip: 'Emergency Contacts',
+                onPressed: () => _showContactsDialog(context),
+              )
+            ],
           ),
           body: SafeArea(
             child: Padding(
@@ -108,6 +186,26 @@ class EmergencyScreen extends StatelessWidget {
                       ),
                     ),
                   const SizedBox(height: 12),
+                  
+                  if (emergency.isRecording)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.redAccent.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: Colors.redAccent.withOpacity(0.5)),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.mic, color: Colors.redAccent, size: 16),
+                          SizedBox(width: 8),
+                          Text('Recording Audio...', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
+                        ],
+                      ),
+                    ),
+                  if (emergency.isRecording)
+                    const SizedBox(height: 12),
 
                   // Last alert
                   if (emergency.lastAlert.isNotEmpty)
@@ -155,7 +253,11 @@ class EmergencyScreen extends StatelessWidget {
                   GestureDetector(
                     onTap: () {
                       HapticFeedback.heavyImpact();
-                      emergency.triggerSOS();
+                      if (emergency.isCountingDown) {
+                        emergency.cancelSOS();
+                      } else {
+                        emergency.triggerSOS();
+                      }
                     },
                     child: Container(
                       width: 180,
@@ -184,6 +286,7 @@ class EmergencyScreen extends StatelessWidget {
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Icon(
+                            emergency.isCountingDown ? Icons.timer :
                             emergency.sosTriggered
                                 ? Icons.sos
                                 : Icons.emergency,
@@ -192,14 +295,18 @@ class EmergencyScreen extends StatelessWidget {
                           ),
                           const SizedBox(height: 8),
                           Text(
-                            emergency.sosTriggered ? 'SOS SENT' : 'SOS',
-                            style: const TextStyle(
+                            emergency.isCountingDown
+                                ? '${emergency.countdownSeconds}'
+                                : emergency.sosTriggered ? 'SOS SENT' : 'SOS',
+                            style: TextStyle(
                               color: Colors.white,
-                              fontSize: 24,
+                              fontSize: emergency.isCountingDown ? 48 : 24,
                               fontWeight: FontWeight.w900,
-                              letterSpacing: 3,
+                              letterSpacing: emergency.isCountingDown ? 0 : 3,
                             ),
                           ),
+                          if (emergency.isCountingDown)
+                             const Text('TAP TO CANCEL', style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
                         ],
                       ),
                     ),

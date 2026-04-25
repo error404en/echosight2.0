@@ -34,6 +34,7 @@ class NavigationRoute:
     destination: str
     total_distance: str
     total_duration: str
+    static_map_url: str = ""
     steps: list[NavigationStep] = field(default_factory=list)
     current_step_index: int = 0
 
@@ -57,6 +58,7 @@ class NavigationRoute:
             "destination": self.destination,
             "total_distance": self.total_distance,
             "total_duration": self.total_duration,
+            "static_map_url": self.static_map_url,
             "current_step_index": self.current_step_index,
             "total_steps": len(self.steps),
             "current_step": asdict(self.current_step) if self.current_step else None,
@@ -117,7 +119,7 @@ async def fetch_walking_route(
     Fetch a walking route from Google Directions API.
     Falls back to a simple direct-route placeholder if no API key is available.
     """
-    api_key = os.getenv("GOOGLE_MAPS_API_KEY", "")
+    api_key = os.getenv("GOOGLE_MAPS_API_KEY")
 
     if api_key:
         route = await _fetch_google_route(origin_lat, origin_lng, destination, api_key)
@@ -175,11 +177,17 @@ async def _fetch_google_route(
                 maneuver=step.get("maneuver", "straight"),
             ))
 
+        overview_polyline = route_data.get("overview_polyline", {}).get("points", "")
+        static_map_url = ""
+        if overview_polyline:
+            static_map_url = f"https://maps.googleapis.com/maps/api/staticmap?size=600x400&path=weight:5%7Ccolor:0x00FF00FF%7Cenc:{overview_polyline}&markers=color:red%7C{destination}&key={api_key}"
+
         return NavigationRoute(
             origin=leg.get("start_address", f"{origin_lat},{origin_lng}"),
             destination=leg.get("end_address", destination),
             total_distance=leg["distance"]["text"],
             total_duration=leg["duration"]["text"],
+            static_map_url=static_map_url,
             steps=steps,
         )
 

@@ -215,9 +215,11 @@ class WebSocketService extends ChangeNotifier {
     String? audioBase64,
     String? imageBase64,
     Map<String, dynamic>? visionContext,
-    Map<String, double>? locationData,
+    Map<String, dynamic>? locationData,
     String mode = 'assistant',
     String? sceneMemory,
+    String? voice,
+    String? ttsRate,
   }) {
     if (!_isConnected || _channel == null) {
       debugPrint('⚠️ Cannot send — not connected');
@@ -235,6 +237,8 @@ class WebSocketService extends ChangeNotifier {
       if (locationData != null) 'location': locationData,
       'mode': mode,
       if (sceneMemory != null) 'scene_memory': sceneMemory,
+      if (voice != null) 'voice': voice,
+      if (ttsRate != null) 'ttsRate': ttsRate,
     };
 
     _channel!.sink.add(jsonEncode(payload));

@@ -41,6 +41,7 @@ class NavigationService extends ChangeNotifier {
   int get totalSteps => _totalSteps;
   String get errorMessage => _errorMessage;
   bool get isNavigating => _state == NavigationState.active;
+  String get staticMapUrl => _routeData?['static_map_url'] ?? '';
 
   NavigationService({
     required this.locationService,
@@ -142,6 +143,17 @@ class NavigationService extends ChangeNotifier {
     _routeData = null;
     _destination = '';
     _currentInstruction = '';
+  }
+
+  /// Repeat the current instruction.
+  void repeatCurrentInstruction() {
+    if (_state == NavigationState.active && _currentInstruction.isNotEmpty) {
+      ttsService.speak('Current step: $_currentInstruction. Distance remaining: $_distanceRemaining.');
+    } else if (_state == NavigationState.arrived) {
+      ttsService.speak('You have arrived at your destination.');
+    } else {
+      ttsService.speak('No active navigation instruction.');
+    }
   }
 
   /// Called when the backend sends [NAV_ARRIVED].

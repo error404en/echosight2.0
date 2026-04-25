@@ -268,7 +268,7 @@ class SurroundingsService extends ChangeNotifier {
     }
 
     // Fetch GPS
-    Map<String, double>? gpsData;
+    Map<String, dynamic>? gpsData;
     try {
       gpsData = await locationService.getCurrentLocation();
     } catch (_) {}

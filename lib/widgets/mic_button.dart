@@ -4,6 +4,8 @@ import '../core/theme.dart';
 import '../services/fusion_engine.dart';
 
 /// Animated microphone button with state-aware visual feedback.
+/// Wrapped in Semantics for TalkBack/VoiceOver accessibility.
+/// Minimum touch target: 96dp for blind users.
 class MicButton extends StatefulWidget {
   final AssistantState state;
   final VoidCallback onTap;
@@ -15,7 +17,7 @@ class MicButton extends StatefulWidget {
     required this.state,
     required this.onTap,
     this.onLongPress,
-    this.size = 80,
+    this.size = 96,
   });
 
   @override
@@ -26,7 +28,7 @@ class _MicButtonState extends State<MicButton> with TickerProviderStateMixin {
   late AnimationController _pulseController;
   late AnimationController _rotationController;
   late Animation<double> _pulseAnimation;
-  late Animation<double> _scaleAnimation;
+
 
   @override
   void initState() {
@@ -43,10 +45,8 @@ class _MicButtonState extends State<MicButton> with TickerProviderStateMixin {
     _pulseAnimation = Tween<double>(begin: 1.0, end: 1.3).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
-    _scaleAnimation = Tween<double>(begin: 1.0, end: 0.95).animate(
-      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
-    );
   }
+
 
   @override
   void didUpdateWidget(MicButton oldWidget) {
@@ -122,94 +122,105 @@ class _MicButtonState extends State<MicButton> with TickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: widget.onTap,
-      onLongPress: widget.onLongPress,
-      child: AnimatedBuilder(
-        animation: Listenable.merge([_pulseController, _rotationController]),
-        builder: (context, child) {
-          return Stack(
-            alignment: Alignment.center,
-            children: [
-              // Outer glow ring
-              if (widget.state != AssistantState.idle)
-                Container(
-                  width: widget.size * 1.6 * _pulseAnimation.value,
-                  height: widget.size * 1.6 * _pulseAnimation.value,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: _glowColor,
-                      width: 2,
-                    ),
-                  ),
-                ),
-
-              // Middle glow ring
-              if (widget.state != AssistantState.idle)
-                Container(
-                  width: widget.size * 1.3 * _pulseAnimation.value,
-                  height: widget.size * 1.3 * _pulseAnimation.value,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: _glowColor.withOpacity(0.1),
-                    border: Border.all(
-                      color: _glowColor.withOpacity(0.5),
-                      width: 1.5,
-                    ),
-                  ),
-                ),
-
-              // Processing rotation ring
-              if (widget.state == AssistantState.processing ||
-                  widget.state == AssistantState.thinking)
-                Transform.rotate(
-                  angle: _rotationController.value * 2 * pi,
-                  child: Container(
-                    width: widget.size * 1.2,
-                    height: widget.size * 1.2,
+    return Semantics(
+      label: widget.state.accessibilityLabel,
+      button: true,
+      hint: widget.state == AssistantState.idle
+          ? 'Double tap to start speaking. Long press for continuous mode.'
+          : widget.state == AssistantState.listening
+              ? 'Double tap to stop listening.'
+              : widget.state == AssistantState.speaking
+                  ? 'Double tap to interrupt and speak.'
+                  : 'Processing your request.',
+      child: GestureDetector(
+        onTap: widget.onTap,
+        onLongPress: widget.onLongPress,
+        child: AnimatedBuilder(
+          animation: Listenable.merge([_pulseController, _rotationController]),
+          builder: (context, child) {
+            return Stack(
+              alignment: Alignment.center,
+              children: [
+                // Outer glow ring
+                if (widget.state != AssistantState.idle)
+                  Container(
+                    width: widget.size * 1.6 * _pulseAnimation.value,
+                    height: widget.size * 1.6 * _pulseAnimation.value,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       border: Border.all(
-                        color: Colors.transparent,
-                        width: 3,
-                      ),
-                      gradient: SweepGradient(
-                        colors: [
-                          _buttonColor.withOpacity(0),
-                          _buttonColor,
-                          _buttonColor.withOpacity(0),
-                        ],
+                        color: _glowColor,
+                        width: 2,
                       ),
                     ),
                   ),
-                ),
 
-              // Main button
-              AnimatedContainer(
-                duration: const Duration(milliseconds: 300),
-                width: widget.size,
-                height: widget.size,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: _buttonColor,
-                  boxShadow: [
-                    BoxShadow(
-                      color: _buttonColor.withOpacity(0.5),
-                      blurRadius: 20,
-                      spreadRadius: 2,
+                // Middle glow ring
+                if (widget.state != AssistantState.idle)
+                  Container(
+                    width: widget.size * 1.3 * _pulseAnimation.value,
+                    height: widget.size * 1.3 * _pulseAnimation.value,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _glowColor.withOpacity(0.1),
+                      border: Border.all(
+                        color: _glowColor.withOpacity(0.5),
+                        width: 1.5,
+                      ),
                     ),
-                  ],
+                  ),
+
+                // Processing rotation ring
+                if (widget.state == AssistantState.processing ||
+                    widget.state == AssistantState.thinking)
+                  Transform.rotate(
+                    angle: _rotationController.value * 2 * pi,
+                    child: Container(
+                      width: widget.size * 1.2,
+                      height: widget.size * 1.2,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: Colors.transparent,
+                          width: 3,
+                        ),
+                        gradient: SweepGradient(
+                          colors: [
+                            _buttonColor.withOpacity(0),
+                            _buttonColor,
+                            _buttonColor.withOpacity(0),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+
+                // Main button — larger for accessibility
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 300),
+                  width: widget.size,
+                  height: widget.size,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: _buttonColor,
+                    boxShadow: [
+                      BoxShadow(
+                        color: _buttonColor.withOpacity(0.5),
+                        blurRadius: 24,
+                        spreadRadius: 3,
+                      ),
+                    ],
+                  ),
+                  child: Icon(
+                    _icon,
+                    color: Colors.white,
+                    size: widget.size * 0.4,
+                  ),
                 ),
-                child: Icon(
-                  _icon,
-                  color: Colors.white,
-                  size: widget.size * 0.4,
-                ),
-              ),
-            ],
-          );
-        },
+              ],
+            );
+          },
+        ),
       ),
     );
   }

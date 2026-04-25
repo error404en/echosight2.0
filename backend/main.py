@@ -160,6 +160,21 @@ async def add_known_face(request: AddFaceRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/voices")
+async def get_voices():
+    """Return available TTS voices for the settings menu."""
+    return {
+        "voices": [
+            {"id": "en-US-JennyNeural", "name": "Jenny (Warm Female)", "gender": "Female"},
+            {"id": "en-US-GuyNeural", "name": "Guy (Calm Male)", "gender": "Male"},
+            {"id": "en-US-AriaNeural", "name": "Aria (Expressive Female)", "gender": "Female"},
+            {"id": "en-US-DavisNeural", "name": "Davis (Deep Male)", "gender": "Male"},
+            {"id": "en-US-SteffanNeural", "name": "Steffan (Clear Male)", "gender": "Male"},
+            {"id": "en-US-JaneNeural", "name": "Jane (Friendly Female)", "gender": "Female"},
+        ]
+    }
+
+
 # ─── Navigation Endpoints ───────────────────────────────────────
 
 class StartNavigationRequest(BaseModel):
@@ -236,6 +251,8 @@ async def websocket_chat(websocket: WebSocket):
             image_b64 = data.get("image")
             vision_context = data.get("vision_context")
             mode = data.get("mode", "assistant")
+            voice_id = data.get("voice", "en-US-JennyNeural")
+            tts_rate = data.get("ttsRate", "+0%")
 
             # 1. Transcribe Audio if present
             if audio_b64:
@@ -327,7 +344,7 @@ async def websocket_chat(websocket: WebSocket):
                     await websocket.send_text(f"[SCENE_MEMORY] {complete_response}")
 
                 # Stream Edge-TTS audio back to Flutter
-                async for audio_chunk in stream_tts(complete_response):
+                async for audio_chunk in stream_tts(complete_response, voice=voice_id, rate=tts_rate):
                     await websocket.send_text(f"[AUDIO] {audio_chunk}")
 
             # Signal end of response

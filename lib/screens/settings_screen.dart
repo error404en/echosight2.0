@@ -196,7 +196,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const Divider(height: 1, color: Colors.white10),
             Consumer<TtsService>(
               builder: (context, tts, _) => _SliderTile(
-                title: 'Speech Rate',
+                title: 'Local Speech Rate (Offline)',
                 value: tts.speechRate,
                 min: 0.1,
                 max: 1.0,
@@ -206,12 +206,91 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const Divider(height: 1, color: Colors.white10),
             Consumer<TtsService>(
               builder: (context, tts, _) => _SliderTile(
-                title: 'Pitch',
+                title: 'Local Pitch (Offline)',
                 value: tts.pitch,
                 min: 0.5,
                 max: 2.0,
                 onChanged: (v) => tts.setPitch(v),
               ),
+            ),
+          ]),
+
+          const SizedBox(height: 24),
+
+          // ── Cloud Voice Section ──
+          _SectionHeader(title: 'Cloud Voice', icon: Icons.cloud),
+          _buildCard([
+            Consumer<TtsService>(
+              builder: (context, tts, _) {
+                final Map<String, String> voices = {
+                  'en-US-JennyNeural': 'Jenny (Warm Female)',
+                  'en-US-GuyNeural': 'Guy (Calm Male)',
+                  'en-US-AriaNeural': 'Aria (Expressive Female)',
+                  'en-US-DavisNeural': 'Davis (Deep Male)',
+                  'en-US-SteffanNeural': 'Steffan (Clear Male)',
+                  'en-US-JaneNeural': 'Jane (Friendly Female)',
+                };
+                
+                return Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            'Voice Character',
+                            style: TextStyle(
+                              color: EchoSightTheme.textPrimary,
+                              fontSize: 16,
+                            ),
+                          ),
+                          DropdownButton<String>(
+                            value: tts.cloudVoiceName,
+                            dropdownColor: const Color(0xFF1A1F38),
+                            underline: const SizedBox(),
+                            icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
+                            style: const TextStyle(color: Colors.white, fontSize: 14),
+                            onChanged: (newValue) {
+                              if (newValue != null) {
+                                tts.setCloudVoice(newValue);
+                                // Optional: Could preview using a direct send message if needed
+                              }
+                            },
+                            items: voices.keys.map<DropdownMenuItem<String>>((String value) {
+                              return DropdownMenuItem<String>(
+                                value: value,
+                                child: Text(voices[value]!),
+                              );
+                            }).toList(),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+            const Divider(height: 1, color: Colors.white10),
+            Consumer<TtsService>(
+              builder: (context, tts, _) {
+                // Map rates to friendly integers for slider: 0 (-10%), 1 (0%), 2 (+10%), 3 (+20%), 4 (+30%)
+                final Map<String, int> rateMap = {'-10%': 0, '+0%': 1, '+10%': 2, '+20%': 3, '+30%': 4};
+                final Map<int, String> reverseRateMap = {0: '-10%', 1: '+0%', 2: '+10%', 3: '+20%', 4: '+30%'};
+                final int currentValue = rateMap[tts.cloudTtsRate] ?? 1;
+
+                return _SliderTile(
+                  title: 'Cloud Speech Rate',
+                  value: currentValue.toDouble(),
+                  min: 0,
+                  max: 4,
+                  divisions: 4,
+                  onChanged: (v) {
+                    tts.setCloudTtsRate(reverseRateMap[v.toInt()]!);
+                  },
+                );
+              },
             ),
           ]),
 
@@ -628,6 +707,7 @@ class _SliderTile extends StatelessWidget {
   final double value;
   final double min;
   final double max;
+  final int? divisions;
   final ValueChanged<double> onChanged;
 
   const _SliderTile({
@@ -635,6 +715,7 @@ class _SliderTile extends StatelessWidget {
     required this.value,
     required this.min,
     required this.max,
+    this.divisions,
     required this.onChanged,
   });
 
@@ -659,6 +740,7 @@ class _SliderTile extends StatelessWidget {
             value: value,
             min: min,
             max: max,
+            divisions: divisions,
             onChanged: onChanged,
           ),
         ],
