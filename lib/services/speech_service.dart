@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:record/record.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
@@ -12,6 +13,7 @@ enum SpeechInputMode {
 }
 
 /// Speech service that supports both on-device STT and cloud STT (via Whisper).
+/// Optimized for blind users with longer pause detection and haptic feedback.
 class SpeechService extends ChangeNotifier {
   final AudioRecorder _audioRecorder = AudioRecorder();
   final stt.SpeechToText _speechToText = stt.SpeechToText();
@@ -97,12 +99,16 @@ class SpeechService extends ChangeNotifier {
             // If the user stops speaking, finalize the result automatically
             if (result.finalResult) {
               _isListening = false;
+              // Haptic to confirm speech was captured
+              HapticFeedback.mediumImpact();
               onTextResult?.call(_currentText);
               notifyListeners();
             }
           },
           listenMode: stt.ListenMode.dictation,
-          pauseFor: const Duration(seconds: 2), // Auto stop after 2 secs of silence
+          // Increased from 2s to 3s — blind users may pause longer between words
+          // while thinking or navigating
+          pauseFor: const Duration(seconds: 3),
         );
         debugPrint('🎤 On-device listening started');
       } else {
@@ -142,6 +148,9 @@ class SpeechService extends ChangeNotifier {
         _isListening = false;
         notifyListeners();
         
+        // Haptic to confirm listening stopped
+        HapticFeedback.lightImpact();
+
         // Emitting the result is handled by the onResult callback's finalResult flag,
         // but if stopped manually, we might need to emit what we have.
         if (_currentText.isNotEmpty && _currentText != 'Listening...') {
@@ -152,6 +161,9 @@ class SpeechService extends ChangeNotifier {
         _isListening = false;
         notifyListeners();
         debugPrint('🎤 Recording stopped');
+
+        // Haptic to confirm recording stopped
+        HapticFeedback.lightImpact();
 
         if (path != null) {
           final file = File(path);

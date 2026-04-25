@@ -7,6 +7,11 @@ import 'location_service.dart';
 import 'websocket_service.dart';
 import 'detection_service.dart';
 import 'ocr_service.dart';
+import 'dart:io';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:record/record.dart';
+import 'package:path_provider/path_provider.dart';
 import 'vision_context_builder.dart';
 
 /// Emergency state for the UI.
@@ -41,6 +46,19 @@ class EmergencyService extends ChangeNotifier {
   String get emergencyLocation => _emergencyLocation;
   bool get sosTriggered => _sosTriggered;
   bool get isActive => _state != EmergencyState.inactive;
+  bool get isRecording => _isRecording;
+  List<Map<String, String>> get emergencyContacts => _emergencyContacts;
+  bool get isCountingDown => _isCountingDown;
+  int get countdownSeconds => _countdownSeconds;
+
+  final _audioRecorder = AudioRecorder();
+  bool _isRecording = false;
+  String _recordingPath = '';
+  
+  List<Map<String, String>> _emergencyContacts = [];
+  Timer? _countdownTimer;
+  int _countdownSeconds = 10;
+  bool _isCountingDown = false;
 
   EmergencyService({
     required this.cameraService,
@@ -54,6 +72,40 @@ class EmergencyService extends ChangeNotifier {
       detectionService: detectionService,
       ocrService: ocrService,
     );
+    _loadContacts();
+  }
+
+  Future<void> _loadContacts() async {
+    final prefs = await SharedPreferences.getInstance();
+    final names = prefs.getStringList('emergency_names') ?? [];
+    final phones = prefs.getStringList('emergency_phones') ?? [];
+    
+    _emergencyContacts.clear();
+    for (int i = 0; i < names.length && i < phones.length; i++) {
+      _emergencyContacts.add({'name': names[i], 'phone': phones[i]});
+    }
+    notifyListeners();
+  }
+
+  Future<void> saveContact(String name, String phone) async {
+    _emergencyContacts.add({'name': name, 'phone': phone});
+    await _saveContactsToPrefs();
+  }
+
+  Future<void> removeContact(int index) async {
+    if (index >= 0 && index < _emergencyContacts.length) {
+      _emergencyContacts.removeAt(index);
+      await _saveContactsToPrefs();
+    }
+  }
+
+  Future<void> _saveContactsToPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final names = _emergencyContacts.map((c) => c['name']!).toList();
+    final phones = _emergencyContacts.map((c) => c['phone']!).toList();
+    await prefs.setStringList('emergency_names', names);
+    await prefs.setStringList('emergency_phones', phones);
+    notifyListeners();
   }
 
   /// Activate emergency mode — starts continuous hazard scanning.
@@ -82,25 +134,65 @@ class EmergencyService extends ChangeNotifier {
     try {
       final loc = await locationService.getCurrentLocation();
       if (loc != null) {
-        _emergencyLocation =
-            'Lat: ${loc['latitude']?.toStringAsFixed(5)}, '
-            'Lng: ${loc['longitude']?.toStringAsFixed(5)}';
+        String address = loc['address'] ?? '';
+        _emergencyLocation = address.isNotEmpty ? address : 
+            'Lat: ${loc['latitude']?.toStringAsFixed(5)}, Lng: ${loc['longitude']?.toStringAsFixed(5)}';
       }
     } catch (_) {}
 
+    // Start recording audio
+    await _startRecording();
+
     // Start continuous scanning every 8 seconds
     _startContinuousScan();
+  }
+
+  Future<void> _startRecording() async {
+    try {
+      if (await _audioRecorder.hasPermission()) {
+        final dir = await getApplicationDocumentsDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        _recordingPath = '${dir.path}/emergency_audio_$timestamp.m4a';
+        await _audioRecorder.start(
+          const RecordConfig(encoder: AudioEncoder.aacLc),
+          path: _recordingPath,
+        );
+        _isRecording = true;
+        notifyListeners();
+      }
+    } catch (e) {
+      debugPrint('❌ Recording failed: $e');
+    }
+  }
+
+  Future<void> _stopRecording() async {
+    try {
+      if (_isRecording) {
+        await _audioRecorder.stop();
+        _isRecording = false;
+        notifyListeners();
+      }
+    } catch (_) {}
   }
 
   /// Deactivate emergency mode.
   void deactivate() {
     _scanTimer?.cancel();
     _scanTimer = null;
+    cancelSOS();
     _state = EmergencyState.inactive;
     _sosTriggered = false;
+    _stopRecording();
     notifyListeners();
 
     ttsService.speak('Emergency mode deactivated. Returning to normal.');
+  }
+
+  void cancelSOS() {
+    _countdownTimer?.cancel();
+    _countdownTimer = null;
+    _isCountingDown = false;
+    notifyListeners();
   }
 
   /// Trigger SOS — high urgency alert with location.
@@ -119,20 +211,74 @@ class EmergencyService extends ChangeNotifier {
     try {
       final loc = await locationService.getCurrentLocation();
       if (loc != null) {
-        _emergencyLocation =
-            'Lat: ${loc['latitude']?.toStringAsFixed(5)}, '
-            'Lng: ${loc['longitude']?.toStringAsFixed(5)}';
+        String address = loc['address'] ?? '';
+        _emergencyLocation = address.isNotEmpty ? address : 
+            'Lat: ${loc['latitude']?.toStringAsFixed(5)}, Lng: ${loc['longitude']?.toStringAsFixed(5)}';
       }
     } catch (_) {}
 
-    final sosMessage =
-        'SOS ALERT! I need immediate help. '
-        'My location is $_emergencyLocation. '
-        'If someone is nearby, please call out.';
+    // Stop previous timer if any
+    cancelSOS();
 
-    _lastAlert = sosMessage;
-    ttsService.speak(sosMessage);
+    _isCountingDown = true;
+    _countdownSeconds = 10;
     notifyListeners();
+    
+    ttsService.speak('SOS Triggered. Sending location to emergency contacts in 10 seconds. Tap cancel to stop.');
+
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      _countdownSeconds--;
+      if (_countdownSeconds > 0) {
+        // Haptic pulse per second
+        Vibration.vibrate(duration: 50);
+        if (_countdownSeconds <= 3) {
+           ttsService.speak(_countdownSeconds.toString());
+        }
+      } else {
+        cancelSOS();
+        _sendEmergencySMS();
+      }
+      notifyListeners();
+    });
+  }
+
+  Future<void> _sendEmergencySMS() async {
+    if (_emergencyContacts.isEmpty) {
+      if (!isCountingDown) { 
+          // Only speak this if we aren't already speaking the countdown
+          ttsService.speak('SOS triggered, but no emergency contacts are saved.');
+      }
+      return;
+    }
+
+    // Attempt to get a Maps link
+    String mapsLink = '';
+    try {
+       final loc = await locationService.getCurrentLocation();
+       if (loc != null) {
+          mapsLink = 'https://maps.google.com/?q=${loc['latitude']},${loc['longitude']}';
+       }
+    } catch (_) {}
+    
+    final sosMessage =
+        'EMERGENCY: I need help! My location is: $mapsLink '
+        'Sent via EchoSight.';
+
+    _lastAlert = 'SOS Message sent to ${_emergencyContacts.length} contacts.';
+    ttsService.speak(_lastAlert);
+    
+    final phones = _emergencyContacts.map((c) => c['phone']!).join(',');
+    final uri = Uri.parse('sms:$phones?body=${Uri.encodeComponent(sosMessage)}');
+    
+    try {
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri);
+      } else {
+        ttsService.speak('Could not open SMS app to send alert.');
+      }
+    } catch (e) {
+      debugPrint('❌ Failed to launch SMS: $e');
+    }
   }
 
   /// Perform a single emergency scan — captures the camera frame,
@@ -165,13 +311,13 @@ class EmergencyService extends ChangeNotifier {
       }
 
       // Fetch GPS
-      Map<String, double>? gpsData;
+      Map<String, dynamic>? gpsData;
       try {
         gpsData = await locationService.getCurrentLocation();
         if (gpsData != null) {
-          _emergencyLocation =
-              'Lat: ${gpsData['latitude']?.toStringAsFixed(5)}, '
-              'Lng: ${gpsData['longitude']?.toStringAsFixed(5)}';
+          String address = gpsData['address'] ?? '';
+          _emergencyLocation = address.isNotEmpty ? address : 
+              'Lat: ${gpsData['latitude']?.toStringAsFixed(5)}, Lng: ${gpsData['longitude']?.toStringAsFixed(5)}';
         }
       } catch (_) {}
 

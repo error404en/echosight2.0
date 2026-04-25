@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 enum AssistantMode {
+  auto,
   assistant,
   surroundings,
   sight,
@@ -13,6 +14,8 @@ enum AssistantMode {
 extension AssistantModeExtension on AssistantMode {
   String get name {
     switch (this) {
+      case AssistantMode.auto:
+        return 'Auto';
       case AssistantMode.assistant:
         return 'Assistant';
       case AssistantMode.surroundings:
@@ -32,6 +35,8 @@ extension AssistantModeExtension on AssistantMode {
 
   IconData get icon {
     switch (this) {
+      case AssistantMode.auto:
+        return Icons.auto_awesome;
       case AssistantMode.assistant:
         return Icons.smart_toy_outlined;
       case AssistantMode.surroundings:
@@ -51,6 +56,8 @@ extension AssistantModeExtension on AssistantMode {
 
   Color get color {
     switch (this) {
+      case AssistantMode.auto:
+        return Colors.tealAccent;
       case AssistantMode.assistant:
         return Colors.blueAccent;
       case AssistantMode.surroundings:
@@ -70,20 +77,22 @@ extension AssistantModeExtension on AssistantMode {
 
   String get description {
     switch (this) {
+      case AssistantMode.auto:
+        return 'Automatically prioritizes safety, reading, and scene detailing';
       case AssistantMode.assistant:
-        return 'General vision and Q&A';
+        return 'Ask me anything about what\'s in front of you';
       case AssistantMode.surroundings:
-        return 'Brief updates on what changed';
+        return 'I continuously scan and tell you what changes around you';
       case AssistantMode.sight:
-        return 'Rich sight-like view of your surroundings';
+        return 'I become your eyes — rich, detailed descriptions of everything';
       case AssistantMode.navigate:
-        return 'Focus on obstacles and safety';
+        return 'Walking directions with obstacle warnings';
       case AssistantMode.reader:
-        return 'Focus on reading text aloud';
+        return 'I read signs, labels, documents, and screens out loud';
       case AssistantMode.identify:
-        return 'Detailed object descriptions';
+        return 'Point your camera — I\'ll identify and describe in detail';
       case AssistantMode.emergency:
-        return 'Immediate danger assessment';
+        return 'Continuous danger scanning, SOS alert, location sharing';
     }
   }
 }

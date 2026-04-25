@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import '../models/assistant_mode.dart';
 import '../models/chat_message.dart';
 import '../models/vision_context.dart';
@@ -15,6 +16,9 @@ import 'location_service.dart';
 
 /// The main fusion engine — orchestrates vision + voice + AI.
 /// On user speech: capture frame → run YOLO + OCR → build context → send to backend → speak response.
+///
+/// This engine is the central nervous system of EchoSight, ensuring all services
+/// work together seamlessly with no overlap or disconnected behavior.
 class FusionEngine extends ChangeNotifier {
   final CameraService cameraService;
   final DetectionService detectionService;
@@ -28,7 +32,7 @@ class FusionEngine extends ChangeNotifier {
 
   // State
   AssistantState _state = AssistantState.idle;
-  AssistantMode _currentMode = AssistantMode.assistant;
+  AssistantMode _currentMode = AssistantMode.auto;
   String _sessionId = 'session_${DateTime.now().millisecondsSinceEpoch}';
   final List<ChatMessage> _messages = [];
   String _currentCaption = '';
@@ -39,6 +43,13 @@ class FusionEngine extends ChangeNotifier {
   bool _isInitialized = false;
   bool _sceneUnchangedSkipDone = false;
   bool _surroundingsScanInFlight = false;
+  Timer? _heartbeatTimer;
+  Timer? _stateTimeoutTimer;
+  DateTime _lastVoiceInputTime = DateTime.fromMillisecondsSinceEpoch(0);
+
+
+  // Callback for screen navigation (set by HomeScreen)
+  void Function(String screenName)? onNavigateToScreen;
 
   // Getters
   AssistantState get state => _state;
@@ -84,6 +95,9 @@ class FusionEngine extends ChangeNotifier {
     final wasProactive = _isProactiveMode(_currentMode);
     final willProactive = _isProactiveMode(newMode);
     _currentMode = newMode;
+
+    // Haptic feedback on mode switch
+    HapticFeedback.mediumImpact();
     notifyListeners();
 
     if (willProactive) {
@@ -100,16 +114,43 @@ class FusionEngine extends ChangeNotifier {
       surroundingsService.deactivate();
     }
 
-    ttsService.speak('${newMode.name} mode enabled');
+    // For navigate and emergency, trigger screen navigation
+    if (newMode == AssistantMode.navigate) {
+      ttsService.speak('${newMode.name} mode. ${newMode.description}. Say your destination.');
+      onNavigateToScreen?.call('navigate');
+      return;
+    }
+    if (newMode == AssistantMode.emergency) {
+      ttsService.speak('${newMode.name} mode. ${newMode.description}.');
+      onNavigateToScreen?.call('emergency');
+      return;
+    }
+
+    ttsService.speak('${newMode.name} mode. ${newMode.description}.');
 
     // Auto-trigger immediate actions for interactive modes
     if (newMode == AssistantMode.reader) {
-      Future.delayed(const Duration(milliseconds: 1500), _handleReadCommand);
+      Future.delayed(const Duration(milliseconds: 3000), _handleReadCommand);
     } else if (newMode == AssistantMode.identify) {
-      Future.delayed(const Duration(milliseconds: 1500), () {
+      Future.delayed(const Duration(milliseconds: 3000), () {
         _handleVoiceInput(query: "Please identify and describe the objects in front of me in detail.");
       });
+    } else if (newMode == AssistantMode.surroundings || newMode == AssistantMode.sight) {
+      surroundingsService.activate();
+      Future.delayed(const Duration(milliseconds: 4000), () {
+        runProactiveSurroundingsScan();
+      });
     }
+  }
+
+  /// Cycle to the next mode — used by swipe gestures.
+  void cycleMode({bool forward = true}) {
+    final modes = AssistantMode.values;
+    final currentIndex = modes.indexOf(_currentMode);
+    final nextIndex = forward
+        ? (currentIndex + 1) % modes.length
+        : (currentIndex - 1 + modes.length) % modes.length;
+    setMode(modes[nextIndex]);
   }
 
   /// Timer-driven scan for Surroundings / Sight (delta + scene_memory).
@@ -120,7 +161,12 @@ class FusionEngine extends ChangeNotifier {
       return;
     }
     if (_surroundingsScanInFlight) return;
-    if (ttsService.isSpeaking) return;
+
+    // Instead of bailing when TTS is speaking, schedule retry after TTS completes
+    if (ttsService.isSpeaking) {
+      _scheduleScanAfterTts();
+      return;
+    }
     if (state == AssistantState.listening || state == AssistantState.processing) {
       return;
     }
@@ -134,7 +180,7 @@ class FusionEngine extends ChangeNotifier {
         query: payload['query'] as String,
         imageBase64: payload['image'] as String?,
         visionContext: payload['vision_context'] as Map<String, dynamic>?,
-        locationData: payload['location'] as Map<String, double>?,
+        locationData: payload['location'] as Map<String, dynamic>?,
         mode: payload['mode'] as String,
         sceneMemory: payload['scene_memory'] as String?,
       );
@@ -146,37 +192,96 @@ class FusionEngine extends ChangeNotifier {
     }
   }
 
+  /// Schedule a scan retry once TTS finishes speaking.
+  void _scheduleScanAfterTts() {
+    final originalCallback = ttsService.onSpeakingComplete;
+    ttsService.onSpeakingComplete = () {
+      ttsService.onSpeakingComplete = originalCallback;
+      
+      // CRITICAL: Execute the original callback to ensure the system returns to 'idle'
+      originalCallback?.call();
+      
+      // Re-check after a brief delay
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (surroundingsService.isActive && !surroundingsService.isPaused) {
+          runProactiveSurroundingsScan();
+        }
+      });
+    };
+  }
+
+  /// Process voice commands that work globally across all modes.
+  /// Returns true if the command was handled.
   bool _tryGlobalVoiceCommand(String query) {
     final q = query.toLowerCase().trim();
     
+    // Navigation commands — directly navigate instead of just speaking
     if (q.contains('navigate to') || q.contains('take me to') || q.contains('start navigation')) {
-       // Voice triggered start navigation. UI would need a navigator key to push, 
-       // but we can set mode and let them know. Actually, to truly navigate we need a destination.
        setMode(AssistantMode.navigate);
-       ttsService.speak('Use the Navigate button to open the map interface.');
        return true;
     }
+
+    // Emergency commands
     if (q.contains('emergency') || q.contains('help me') || q.contains('sos')) {
        setMode(AssistantMode.emergency);
-       ttsService.speak('Use the SOS button at the bottom to trigger the alarm.');
        return true;
     }
-    if (q.contains('read this') || q.contains('what does it say')) {
+
+    // Reading commands
+    if (q.contains('read this') || q.contains('what does it say') || q.contains('read that')) {
        setMode(AssistantMode.reader);
        return true;
     }
-    if (q.contains('surroundings') || q.contains('scan around')) {
+
+    // Surroundings mode commands
+    if (q.contains('surroundings') || q.contains('scan around') || q.contains('what is around me')) {
        setMode(AssistantMode.surroundings);
        return true;
     }
+
+    // Sight mode commands
+    if (q.contains('sight mode') || q.contains('be my eyes') || q.contains('sight stream')) {
+       setMode(AssistantMode.sight);
+       return true;
+    }
+
+    // Identify mode commands
+    if (q.contains('identify') || q.contains('what is this') || q.contains('describe this')) {
+       setMode(AssistantMode.identify);
+       return true;
+    }
+
+    // Assistant mode commands
+    if (q.contains('assistant mode') || q.contains('general mode') || q.contains('normal mode')) {
+       setMode(AssistantMode.assistant);
+       return true;
+    }
+
+    // Pause/resume surroundings
     if (q.contains('pause') || q.contains('quiet') || q.contains('mute')) {
-      if (surroundingsService.isActive) surroundingsService.pause();
+      if (surroundingsService.isActive) {
+        surroundingsService.pause();
+      } else {
+        ttsService.speak('No active scan to pause.');
+      }
       return true;
     }
     if (q.contains('resume') || q == 'continue' || q.contains('unmute')) {
-      if (surroundingsService.isActive) surroundingsService.resume();
+      if (surroundingsService.isActive) {
+        surroundingsService.resume();
+      } else {
+        ttsService.speak('No paused scan to resume.');
+      }
       return true;
     }
+
+    // Stop everything
+    if (q == 'stop' || q == 'shut up' || q == 'be quiet') {
+      ttsService.stop();
+      if (surroundingsService.isActive) surroundingsService.pause();
+      return true;
+    }
+
     return false;
   }
 
@@ -191,6 +296,8 @@ class FusionEngine extends ChangeNotifier {
     // When on-device speech recognition finishes
     speechService.onTextResult = (text) {
       if (text.isNotEmpty && text != 'Listening...') {
+        // Haptic to confirm speech was recognized
+        HapticFeedback.selectionClick();
         _handleVoiceInput(query: text);
       } else {
         _setState(AssistantState.idle);
@@ -214,6 +321,10 @@ class FusionEngine extends ChangeNotifier {
           }
         });
       } else {
+        // Clear streaming response text after speech is done
+        // so UI doesn't show stale text
+        _streamingResponse = '';
+        _currentCaption = '';
         _setState(AssistantState.idle);
       }
     };
@@ -244,14 +355,23 @@ class FusionEngine extends ChangeNotifier {
       _isInitialized = true;
       notifyListeners();
 
+      // Start the heartbeat timer — subtle haptic every 30s when idle
+      // so the user knows the app is alive
+      _startHeartbeat();
+
       // Give user audio feedback about connection status after a short delay
       Future.delayed(const Duration(seconds: 3), () {
         if (webSocketService.isConnected) {
-          ttsService.speak('EchoSight ready. Tap the microphone to speak.');
+          ttsService.speak(
+            'EchoSight ready. '
+            'Tap anywhere to speak. '
+            'Swipe left or right to change modes.',
+          );
         } else {
           ttsService.speak(
             'EchoSight is running in offline mode. '
-            'Please check your server connection in settings.',
+            'Tap anywhere to speak. '
+            'Check your server connection in settings.',
           );
         }
       });
@@ -261,9 +381,22 @@ class FusionEngine extends ChangeNotifier {
     }
   }
 
+  /// Start a heartbeat — subtle haptic feedback when idle so
+  /// the blind user knows the app is alive and responsive.
+  void _startHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (_state == AssistantState.idle && !ttsService.isSpeaking) {
+        HapticFeedback.selectionClick();
+      }
+    });
+  }
+
   /// Start listening for user speech.
   Future<void> startListening() async {
-    if (_state == AssistantState.speaking) {
+    // Allow the user to interrupt ANY state by tapping the mic.
+    // This prevents the app from ever being permanently unresponsive.
+    if (_state == AssistantState.speaking || _state == AssistantState.thinking || _state == AssistantState.processing) {
       await ttsService.stop();
     }
 
@@ -287,11 +420,21 @@ class FusionEngine extends ChangeNotifier {
   /// Toggle continuous listening mode.
   void toggleContinuousMode() {
     _continuousMode = !_continuousMode;
+    HapticFeedback.mediumImpact();
     notifyListeners();
   }
 
   /// Handle recorded audio voice input or text query
   Future<void> _handleVoiceInput({String? audioBase64, String? query}) async {
+    // Debounce to prevent dual-execution from local STT & cloud STT overlapping.
+    // This stops concurrent camera capture requests which deadlock the camera feed.
+    final now = DateTime.now();
+    if (now.difference(_lastVoiceInputTime).inMilliseconds < 1000) {
+      debugPrint('⚠️ Ignoring concurrent voice input trigger');
+      return;
+    }
+    _lastVoiceInputTime = now;
+
     if (query != null && query.isNotEmpty) {
       if (_tryGlobalVoiceCommand(query)) {
         _setState(AssistantState.idle);
@@ -303,6 +446,10 @@ class FusionEngine extends ChangeNotifier {
 
     // Add query to local chat if we have text right away (on-device STT)
     if (query != null && query.isNotEmpty) {
+      // Clear the caption to show it was captured
+      _currentCaption = query;
+      notifyListeners();
+
       _addMessage(ChatMessage(
         content: query,
         role: MessageRole.user,
@@ -338,7 +485,7 @@ class FusionEngine extends ChangeNotifier {
     }
 
     // 3. Fetch GPS
-    Map<String, double>? gpsData;
+    Map<String, dynamic>? gpsData;
     try {
       gpsData = await locationService.getCurrentLocation();
     } catch (e) {
@@ -363,68 +510,12 @@ class FusionEngine extends ChangeNotifier {
       sceneMemory: (_isProactiveMode(_currentMode) && surroundingsService.isActive)
           ? surroundingsService.lastSceneDescription
           : null,
+      voice: ttsService.cloudVoiceName,
+      ttsRate: ttsService.cloudTtsRate,
     );
     _setState(AssistantState.thinking);
   }
 
-  /// (Legacy text input handler for typing if needed)
-  Future<void> _handleUserSpeech(String userText) async {
-    _setState(AssistantState.processing);
-    _currentCaption = userText;
-
-    // Add user message to chat
-    _addMessage(ChatMessage(
-      content: userText,
-      role: MessageRole.user,
-      hasVisionContext: true,
-    ));
-
-    // Check for special commands
-    if (_isReadCommand(userText)) {
-      await _handleReadCommand();
-      return;
-    }
-
-    // 1. Capture current camera frame
-    String? imageBase64;
-    VisionContext? visionContext;
-
-    try {
-      imageBase64 = await cameraService.captureFrame();
-
-      // 2. Build vision context (YOLO + OCR)
-      if (cameraService.isInitialized) {
-        final rawFrame = await cameraService.captureRawFrame();
-        if (rawFrame != null) {
-          visionContext = await _contextBuilder.buildContext(rawFrame);
-        }
-      }
-
-      // Fallback to mock context if detection service not ready
-      if (visionContext == null || visionContext.isEmpty) {
-        visionContext = _contextBuilder.buildMockContext();
-      }
-
-      _lastVisionContext = visionContext;
-    } catch (e) {
-      debugPrint('⚠️ Frame capture failed: $e');
-    }
-
-    // 3. Send to backend via WebSocket
-    if (webSocketService.isConnected) {
-      _streamingResponse = '';
-      webSocketService.sendMessage(
-        sessionId: _sessionId,
-        query: userText,
-        imageBase64: imageBase64,
-        visionContext: visionContext?.toJson(),
-      );
-      _setState(AssistantState.thinking);
-    } else {
-      // Offline fallback
-      _handleOfflineResponse(userText, visionContext);
-    }
-  }
 
   /// Handle streaming response chunks from the backend.
   void _handleResponseChunk(String chunk) {
@@ -440,7 +531,18 @@ class FusionEngine extends ChangeNotifier {
           role: MessageRole.assistant,
         ));
       }
-      _setState(AssistantState.speaking);
+      // Clear the user caption since we're done processing
+      _currentCaption = '';
+
+      // CRITICAL FIX: If TTS has already finished playing all audio chunks
+      // before [DONE] arrived, go straight to idle. Otherwise the app gets
+      // permanently stuck in 'speaking' state with no callback to rescue it.
+      if (ttsService.isSpeaking) {
+        _setState(AssistantState.speaking);
+      } else {
+        _streamingResponse = '';
+        _setState(AssistantState.idle);
+      }
       return;
     }
 
@@ -452,6 +554,7 @@ class FusionEngine extends ChangeNotifier {
         role: MessageRole.assistant,
       ));
       // Speak the error via local TTS so user always hears feedback
+      _currentCaption = '';
       ttsService.speak(errorMsg);
       _setState(AssistantState.speaking);
       return;
@@ -463,6 +566,7 @@ class FusionEngine extends ChangeNotifier {
         content: 'Rate limit reached. Try speaking to pause or wait.',
         role: MessageRole.assistant,
       ));
+      _currentCaption = '';
       ttsService.speak('API rate limit reached. Pausing automatic scans.');
       if (surroundingsService.isActive && !surroundingsService.isPaused) {
         surroundingsService.pause();
@@ -485,9 +589,11 @@ class FusionEngine extends ChangeNotifier {
 
     if (chunk.startsWith('[AUDIO]')) {
       final audioBase64 = chunk.substring(7).trim();
-      if (_state == AssistantState.thinking) {
-        _setState(AssistantState.speaking);
-      }
+      // Clear user caption once we start getting audio responses
+      // to prevent overlap between what user said and AI response
+      _currentCaption = '';
+      // Don't flicker state — only transition to speaking on [DONE]
+      // The TTS service handles speaking state independently
       ttsService.playAudioBase64(audioBase64);
       return;
     }
@@ -514,6 +620,10 @@ class FusionEngine extends ChangeNotifier {
     }
 
     // Default: append text chunk (for chat log)
+    // Clear user caption once response starts streaming
+    if (_streamingResponse.isEmpty && _currentCaption.isNotEmpty) {
+      _currentCaption = '';
+    }
     _streamingResponse += chunk;
     notifyListeners();
   }
@@ -571,20 +681,11 @@ class FusionEngine extends ChangeNotifier {
       role: MessageRole.assistant,
     ));
     _streamingResponse = response;
+    _currentCaption = '';
     ttsService.speak(response);
     _setState(AssistantState.speaking);
   }
 
-  /// Check if the user wants to read text.
-  bool _isReadCommand(String text) {
-    final lower = text.toLowerCase().trim();
-    return lower.contains('read this') ||
-        lower.contains('read that') ||
-        lower.contains('what does this say') ||
-        lower.contains('what does it say') ||
-        lower.contains('read the text') ||
-        lower.contains('read it');
-  }
 
   /// Add a message to the conversation.
   void _addMessage(ChatMessage message) {
@@ -599,16 +700,55 @@ class FusionEngine extends ChangeNotifier {
     _streamingResponse = '';
     _currentCaption = '';
     notifyListeners();
+    ttsService.speak('Conversation cleared.');
   }
 
   void _setState(AssistantState newState) {
+    if (_state == newState) return;
+
     _state = newState;
+
+    // Safety timeout: if the app stays in a non-idle state for too long,
+    // auto-recover to idle to prevent the app from going permanently silent.
+    _stateTimeoutTimer?.cancel();
+    if (newState != AssistantState.idle) {
+      _stateTimeoutTimer = Timer(const Duration(seconds: 30), () {
+        if (_state != AssistantState.idle && !ttsService.isSpeaking) {
+          debugPrint('⚠️ State timeout: stuck in $_state, recovering to idle');
+          _streamingResponse = '';
+          _currentCaption = '';
+          _state = AssistantState.idle;
+          notifyListeners();
+        }
+      });
+    }
+
+    // Haptic feedback on every state transition so blind user
+    // knows something changed
+    switch (newState) {
+      case AssistantState.listening:
+        HapticFeedback.mediumImpact();
+        break;
+      case AssistantState.processing:
+      case AssistantState.thinking:
+        HapticFeedback.lightImpact();
+        break;
+      case AssistantState.speaking:
+        HapticFeedback.selectionClick();
+        break;
+      case AssistantState.idle:
+        // No haptic for idle — it's the resting state
+        break;
+    }
+
     notifyListeners();
   }
 
   @override
   void dispose() {
     _responseSubscription?.cancel();
+    _heartbeatTimer?.cancel();
+    _stateTimeoutTimer?.cancel();
     super.dispose();
   }
 }
@@ -650,6 +790,22 @@ extension AssistantStateX on AssistantState {
         return '🧠';
       case AssistantState.speaking:
         return '🔊';
+    }
+  }
+
+  /// Accessibility label for screen readers
+  String get accessibilityLabel {
+    switch (this) {
+      case AssistantState.idle:
+        return 'Ready. Tap anywhere to speak.';
+      case AssistantState.listening:
+        return 'Listening to you now.';
+      case AssistantState.processing:
+        return 'Processing your request.';
+      case AssistantState.thinking:
+        return 'EchoSight is thinking.';
+      case AssistantState.speaking:
+        return 'EchoSight is speaking. Tap to interrupt.';
     }
   }
 }
