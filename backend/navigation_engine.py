@@ -121,10 +121,19 @@ async def fetch_walking_route(
     """
     api_key = os.getenv("GOOGLE_MAPS_API_KEY")
 
+    route = None
     if api_key:
         route = await _fetch_google_route(origin_lat, origin_lng, destination, api_key)
-    else:
-        # Without Maps API, create a simplified direct route
+
+    if not route:
+        print("[NAV] Google Maps failed or unavailable. Falling back to free OSRM routing...")
+        # Since OSRM needs coordinates for both origin and destination, 
+        # and the user provides a string destination (e.g. "park"), 
+        # we'll do a quick geocode using Nominatim (OpenStreetMap) if needed,
+        # but actually, if destination is a string, we need coordinates.
+        route = await _fetch_osrm_route(origin_lat, origin_lng, destination)
+        
+    if not route:
         route = _create_fallback_route(origin_lat, origin_lng, destination)
 
     if route:
@@ -195,6 +204,97 @@ async def _fetch_google_route(
         print(f"[ERR] Google Directions API failed: {e}")
         return None
 
+async def _fetch_osrm_route(
+    origin_lat: float,
+    origin_lng: float,
+    destination: str,
+) -> Optional[NavigationRoute]:
+    """Fallback: Geocode via Nominatim, route via free OSRM."""
+    try:
+        # 1. Geocode destination using free Nominatim (OpenStreetMap)
+        geo_url = "https://nominatim.openstreetmap.org/search"
+        headers = {"User-Agent": "EchoSight-Accessibility-App/1.0"}
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(geo_url, params={"q": destination, "format": "json", "limit": 1}) as resp:
+                geo_data = await resp.json()
+                
+        if not geo_data:
+            print("[NAV] OSRM Geocoding failed: Could not find destination.")
+            return None
+            
+        dest_lat = float(geo_data[0]["lat"])
+        dest_lng = float(geo_data[0]["lon"])
+        dest_name = geo_data[0].get("display_name", destination).split(",")[0]
+
+        # 2. Get walking route from OSRM
+        osrm_url = f"https://router.project-osrm.org/route/v1/foot/{origin_lng},{origin_lat};{dest_lng},{dest_lat}"
+        params = {"steps": "true", "overview": "full", "geometries": "geojson"}
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(osrm_url, params=params) as resp:
+                route_data = await resp.json()
+
+        if route_data.get("code") != "Ok":
+            return None
+
+        route = route_data["routes"][0]
+        osrm_steps = route["legs"][0]["steps"]
+        
+        steps = []
+        for i, s in enumerate(osrm_steps):
+            m = s.get("maneuver", {})
+            m_type = m.get("type", "")
+            m_mod = m.get("modifier", "")
+            name = s.get("name", "")
+            
+            # Generate human-readable instruction
+            if m_type == "turn":
+                instruction = f"Turn {m_mod} onto {name}" if name else f"Turn {m_mod}"
+            elif m_type == "depart":
+                instruction = f"Head {m_mod} on {name}" if name else f"Head {m_mod}"
+            elif m_type == "arrive":
+                instruction = f"Arrive at {dest_name}"
+            else:
+                instruction = f"Continue {m_mod} on {name}" if name else "Continue straight"
+                
+            dist_m = s.get("distance", 0)
+            dur_s = s.get("duration", 0)
+            
+            # Find the end location (start of next step, or destination)
+            if i + 1 < len(osrm_steps):
+                next_loc = osrm_steps[i+1].get("maneuver", {}).get("location", [dest_lng, dest_lat])
+            else:
+                next_loc = [dest_lng, dest_lat]
+            
+            curr_loc = m.get("location", [origin_lng, origin_lat])
+            
+            steps.append(NavigationStep(
+                instruction=instruction.replace("  ", " ").strip(),
+                distance_meters=dist_m,
+                distance_text=f"{int(dist_m)} m",
+                duration_text=f"{int(dur_s // 60)} min",
+                start_lat=curr_loc[1],
+                start_lng=curr_loc[0],
+                end_lat=next_loc[1],
+                end_lng=next_loc[0],
+                maneuver=f"{m_type}-{m_mod}"
+            ))
+
+        total_dist = route.get("distance", 0)
+        total_dur = route.get("duration", 0)
+        
+        return NavigationRoute(
+            origin=f"{origin_lat:.4f},{origin_lng:.4f}",
+            destination=dest_name,
+            total_distance=f"{int(total_dist)} m",
+            total_duration=f"{int(total_dur // 60)} min",
+            static_map_url="",
+            steps=steps,
+        )
+
+    except Exception as e:
+        print(f"[ERR] OSRM Fallback failed: {e}")
+        return None
 
 def _create_fallback_route(
     origin_lat: float,

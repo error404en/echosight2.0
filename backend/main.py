@@ -159,7 +159,76 @@ async def add_known_face(request: AddFaceRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# --- PLACES MEMORY ENGINE ---
+import json
+import math
 
+PLACES_FILE = "saved_places.json"
+
+class MemorizePlaceRequest(BaseModel):
+    name: str
+    lat: float
+    lng: float
+
+@app.post("/api/memorize-place")
+async def memorize_place(request: MemorizePlaceRequest):
+    """Save a GPS location with a semantic name."""
+    if not request.name.strip():
+        raise HTTPException(status_code=400, detail="Name required.")
+        
+    try:
+        places = {}
+        if os.path.exists(PLACES_FILE):
+            with open(PLACES_FILE, "r") as f:
+                places = json.load(f)
+                
+        # Clean the name to be dictionary-safe
+        clean_name = request.name.strip().title()
+        places[clean_name] = {"lat": request.lat, "lng": request.lng}
+        
+        with open(PLACES_FILE, "w") as f:
+            json.dump(places, f, indent=4)
+            
+        return {"status": "success", "name": clean_name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+def _get_nearest_saved_place(lat: float, lng: float, threshold_meters: float = 30.0) -> str:
+    """Returns the name of the nearest saved place if within threshold."""
+    if not os.path.exists(PLACES_FILE):
+        return ""
+        
+    try:
+        with open(PLACES_FILE, "r") as f:
+            places = json.load(f)
+            
+        closest_name = ""
+        min_dist = float('inf')
+        
+        for name, coords in places.items():
+            # Haversine distance
+            R = 6371e3
+            phi1 = math.radians(lat)
+            phi2 = math.radians(coords["lat"])
+            dphi = math.radians(coords["lat"] - lat)
+            dlambda = math.radians(coords["lng"] - lng)
+            
+            a = math.sin(dphi/2) * math.sin(dphi/2) + \
+                math.cos(phi1) * math.cos(phi2) * \
+                math.sin(dlambda/2) * math.sin(dlambda/2)
+            c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+            dist = R * c
+            
+            if dist < min_dist and dist <= threshold_meters:
+                min_dist = dist
+                closest_name = name
+                
+        return closest_name
+    except Exception as e:
+        print(f"[ERR] Failed to read saved places: {e}")
+        return ""
+
+# --- CHAT SESSION STATE ---
 @app.get("/api/voices")
 async def get_voices():
     """Return available TTS voices for the settings menu."""
@@ -281,6 +350,38 @@ async def websocket_chat(websocket: WebSocket):
 
             # ─── Navigation context injection ───────────────────
             location_data = data.get("location")
+            location_context = ""
+            if location_data:
+                lat = float(location_data.get("latitude", 0))
+                lng = float(location_data.get("longitude", 0))
+                addr = location_data.get("address", "")
+                
+                # Perform backend reverse geocoding if address is missing
+                if not addr and lat != 0 and lng != 0:
+                    import httpx
+                    try:
+                        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lng}&zoom=18&addressdetails=1"
+                        headers = {"User-Agent": "EchoSight/1.0"}
+                        async with httpx.AsyncClient() as client:
+                            resp = await client.get(url, headers=headers, timeout=2.0)
+                            if resp.status_code == 200:
+                                d = resp.json()
+                                a = d.get("address", {})
+                                parts = [a.get("road"), a.get("suburb"), a.get("city") or a.get("town") or a.get("village")]
+                                addr = ", ".join([p for p in parts if p]) or d.get("display_name", "")
+                    except Exception as e:
+                        print(f"[WARN] Backend reverse geocode failed: {e}")
+                
+                # Do NOT pass raw GPS strings that the AI might read out loud.
+                # Only pass human-readable info.
+                location_context = "Location Constraints: NEVER read raw GPS coordinates out loud. Use general, human-understandable terms. "
+                if addr:
+                    location_context += f"| Current Physical Address: {addr}"
+                    
+                nearest_place = _get_nearest_saved_place(lat, lng)
+                if nearest_place:
+                    location_context += f" | NOTE: User is currently at their saved place: '{nearest_place}'."
+
             active_route = get_active_route(session_id)
             if active_route and not active_route.is_complete and location_data:
                 nav_ctx = build_navigation_context(
@@ -313,6 +414,11 @@ async def websocket_chat(websocket: WebSocket):
 
             # Stream response from the Groq vision model
             full_response = []
+            buffer = ""
+            mode_switch_completed = False
+            
+            import re
+            
             async for chunk in analyze_with_groq(
                 query=query,
                 system_prompt=system_prompt,
@@ -322,18 +428,43 @@ async def websocket_chat(websocket: WebSocket):
                 location_data=location_data,
             ):
                 full_response.append(chunk)
-                await websocket.send_text(chunk)
+                
+                # Check for zero-latency mode switch tag at the beginning of the stream
+                if not mode_switch_completed:
+                    buffer += chunk
+                    if buffer.startswith("[MODE_SWITCH:"):
+                        if "]" in buffer:
+                            tag_end = buffer.find("]")
+                            tag = buffer[:tag_end+1]
+                            mode_to_switch = tag.split(":")[1].strip(" ]")
+                            await websocket.send_text(f"[COMMAND_SWITCH_MODE: {mode_to_switch}]")
+                            mode_switch_completed = True
+                            
+                            # Send whatever is left after the tag
+                            remainder = buffer[tag_end+1:].lstrip()
+                            if remainder:
+                                await websocket.send_text(remainder)
+                    elif len(buffer) > 15 and not buffer.startswith("["):
+                        # Clearly not a tag, flush buffer
+                        mode_switch_completed = True
+                        await websocket.send_text(buffer)
+                else:
+                    await websocket.send_text(chunk)
 
             # Save full response to conversation memory (skip errors/rate limits)
             complete_response = "".join(full_response)
-            if complete_response and not complete_response.startswith("[ERROR]") and complete_response != "[RATE_LIMIT]":
-                session.add_assistant_message(complete_response)
+            
+            # Strip the tag from the final response so TTS doesn't speak it
+            clean_response = re.sub(r'\[MODE_SWITCH:.*?\]', '', complete_response).strip()
+            
+            if clean_response and not clean_response.startswith("[ERROR]") and clean_response != "[RATE_LIMIT]":
+                session.add_assistant_message(clean_response)
 
             # For surroundings mode: send scene memory back to Flutter
             # and skip TTS if "no changes"
             is_no_change = (
                 mode in ("surroundings", "sight", "auto") and
-                complete_response.strip().lower().replace(".", "") in
+                clean_response.lower().replace(".", "") in
                 ["no changes", "no change", "nothing changed"]
             )
 
@@ -342,10 +473,10 @@ async def websocket_chat(websocket: WebSocket):
             else:
                 # Send scene memory update back to Flutter
                 if mode in ("surroundings", "sight", "auto"):
-                    await websocket.send_text(f"[SCENE_MEMORY] {complete_response}")
+                    await websocket.send_text(f"[SCENE_MEMORY] {clean_response}")
 
                 # Stream Edge-TTS audio back to Flutter
-                async for audio_chunk in stream_tts(complete_response, voice=voice_id, rate=tts_rate):
+                async for audio_chunk in stream_tts(clean_response, voice=voice_id, rate=tts_rate):
                     await websocket.send_text(f"[AUDIO] {audio_chunk}")
 
             # Signal end of response
