@@ -8,6 +8,8 @@ import '../services/camera_service.dart';
 import '../services/tts_service.dart';
 import '../services/websocket_service.dart';
 import '../services/surroundings_service.dart';
+import '../services/emergency_service.dart';
+import '../services/location_service.dart';
 
 /// Settings screen for configuring the app.
 class SettingsScreen extends StatefulWidget {
@@ -388,8 +390,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           const SizedBox(height: 24),
 
+          // ── Emergency Section ──
+          _SectionHeader(title: 'Emergency Contacts', icon: Icons.emergency),
+          _buildCard([
+            _SettingsTile(
+              title: 'SOS Contacts',
+              subtitle: 'Contacts to notify during an emergency',
+              trailing: ElevatedButton.icon(
+                icon: const Icon(Icons.person_add, size: 16),
+                label: const Text('Add Contact'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: EchoSightTheme.danger,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                onPressed: () => _showAddContactDialog(context),
+              ),
+            ),
+            // We can consume EmergencyService here to list contacts, but 
+            // the user just wants the ability to add them for now.
+          ]),
+
+          const SizedBox(height: 24),
+
           // ── Face Recognition Section ──
-          _SectionHeader(title: 'Face Recognition', icon: Icons.face),
           _buildCard([
             _SettingsTile(
               title: 'Known Identities',
@@ -405,6 +431,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ),
                 onPressed: () => _showAddFaceDialog(context),
+              ),
+            ),
+          ]),
+
+          const SizedBox(height: 24),
+
+          // ── Saved Places Section ──
+          _SectionHeader(title: 'Saved Places', icon: Icons.place),
+          _buildCard([
+            _SettingsTile(
+              title: 'Visual Memory',
+              subtitle: 'Memorize your current location',
+              trailing: ElevatedButton.icon(
+                icon: const Icon(Icons.add_location_alt, size: 16),
+                label: const Text('Save Place'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: EchoSightTheme.primary,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                onPressed: () => _showAddPlaceDialog(context),
               ),
             ),
           ]),
@@ -612,6 +661,164 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   },
                   style: ElevatedButton.styleFrom(backgroundColor: EchoSightTheme.primary),
                   child: const Text('Capture & Save', style: TextStyle(color: Colors.white)),
+                ),
+              ],
+            );
+          }
+        );
+      }
+    );
+  }
+
+  Future<void> _showAddContactDialog(BuildContext context) async {
+    final nameController = TextEditingController();
+    final phoneController = TextEditingController();
+    final emergencyService = context.read<EmergencyService>();
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: EchoSightTheme.surfaceDark,
+          title: const Text('Add Emergency Contact', style: TextStyle(color: Colors.white)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameController,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  labelText: 'Name',
+                  filled: true,
+                  fillColor: Colors.white.withOpacity(0.05),
+                ),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: phoneController,
+                style: const TextStyle(color: Colors.white),
+                keyboardType: TextInputType.phone,
+                decoration: InputDecoration(
+                  labelText: 'Phone Number',
+                  filled: true,
+                  fillColor: Colors.white.withOpacity(0.05),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final name = nameController.text.trim();
+                final phone = phoneController.text.trim();
+                if (name.isNotEmpty && phone.isNotEmpty) {
+                  await emergencyService.saveContact(name, phone);
+                  if (context.mounted) {
+                    Navigator.pop(dialogContext);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Saved contact: $name')),
+                    );
+                  }
+                }
+              },
+              style: ElevatedButton.styleFrom(backgroundColor: EchoSightTheme.danger),
+              child: const Text('Save Contact', style: TextStyle(color: Colors.white)),
+            ),
+          ],
+        );
+      }
+    );
+  }
+
+  Future<void> _showAddPlaceDialog(BuildContext context) async {
+    final nameController = TextEditingController();
+    final ws = context.read<WebSocketService>();
+    final loc = context.read<LocationService>();
+    final baseUrl = ws.httpBaseUrl;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        bool isSaving = false;
+        
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              backgroundColor: EchoSightTheme.surfaceDark,
+              title: const Text('Memorize Place', style: TextStyle(color: Colors.white)),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'Give this current location a name (e.g. My Living Room, Grocery Store Entrance). The AI will remember you are here.',
+                    style: TextStyle(color: Colors.white70, fontSize: 14),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: nameController,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      labelText: 'Place Name',
+                      filled: true,
+                      fillColor: Colors.white.withOpacity(0.05),
+                    ),
+                  ),
+                  if (isSaving)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 16),
+                      child: CircularProgressIndicator(),
+                    ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: isSaving ? null : () => Navigator.pop(dialogContext),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: isSaving ? null : () async {
+                    if (nameController.text.trim().isEmpty) return;
+                    
+                    setDialogState(() => isSaving = true);
+                    
+                    try {
+                      final currentLoc = await loc.getCurrentLocation();
+                      if (currentLoc == null) {
+                        throw Exception("Failed to get GPS fix.");
+                      }
+                      
+                      final response = await http.post(
+                        Uri.parse('$baseUrl/api/memorize-place'),
+                        headers: {'Content-Type': 'application/json'},
+                        body: jsonEncode({
+                          'name': nameController.text.trim(),
+                          'lat': currentLoc['latitude'],
+                          'lng': currentLoc['longitude'],
+                        }),
+                      );
+                      
+                      if (response.statusCode == 200) {
+                        Navigator.pop(dialogContext); // Close dialog
+                        ScaffoldMessenger.of(this.context).showSnackBar(
+                          SnackBar(content: Text('Memorized place: ${nameController.text}')),
+                        );
+                      } else {
+                        throw Exception(response.body);
+                      }
+                    } catch (e) {
+                      setDialogState(() => isSaving = false);
+                      ScaffoldMessenger.of(this.context).showSnackBar(
+                        SnackBar(content: Text('Failed: $e'), backgroundColor: EchoSightTheme.danger),
+                      );
+                    }
+                  },
+                  style: ElevatedButton.styleFrom(backgroundColor: EchoSightTheme.primary),
+                  child: const Text('Save Place', style: TextStyle(color: Colors.white)),
                 ),
               ],
             );

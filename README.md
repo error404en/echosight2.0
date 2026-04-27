@@ -12,22 +12,62 @@ An advanced, multimodal AI-powered cross-platform mobile application that provid
 - **🛡️ Instant Hazard Detection (YOLOv8n)** — A robust on-device float16 YOLOv8 AI model evaluating 80 categories at high frame rates, generating instant spatial layouts ('Left', 'Near', 'Right') even entirely offline.
 - **📖 Local Text Recognition (OCR)** — Tap-to-read functionality using Google ML Kit vector extraction.
 
-## 🏗️ Technical Architecture Snapshot
+## 🔄 System Pipeline
+
+The following diagram illustrates how sensory data moves through the EchoSight architecture:
 
 ```text
-Flutter App (Edge Hardware)
-├── Dynamic Fusion Engine (Coordinates states & modes)
-├── Native Audio (flutter_tts / speech_to_text local fallbacks)
-├── YOLOv8n TFLite (Float16 CPU object detection + Custom NMS)
-├── Google ML Kit (Signage / Document OCR)
-└── WebSocket Client (Auto-discovering fallback router)
-        ↓
-FastAPI Python Backend (Cloud Orchestrator)
-├── Whisper Audio Engine (Groq LPU API)
-├── Conversation Memory Manager (Delta checks & history)
-├── Groq Vision Client (Multimodal spatial orchestrator)
-└── Face Engine (dlib HOG face localization & embedding cache)
+[ USER ENVIRONMENT ]
+       │
+       ├─► (Camera) ───────► Local YOLOv8 (Offline Hazards) ────────┐
+       ├─► (Microphone) ───► Intelligent Noise Filter ──────────────┤
+       ├─► (GPS Sensor) ───► Background Location Tracking ──────────┤
+       │                                                            │
+[ FLUTTER FUSION ENGINE ] ◄─────────────────────────────────────────┘
+       │
+       ├─► Packages VisionContext (Objects, OCR, Motion)
+       ├─► Enforces Mode State (Auto, Surroundings, Identify, Chat)
+       │
+       ▼ (WebSocket Stream)
+[ PYTHON BACKEND ORCHESTRATOR ]
+       │
+       ├─► STT (Whisper) converts audio to text
+       ├─► Backend Reverse Geocoding (OpenStreetMap) injects human-readable location
+       ├─► Face Recognition checks `Face Identity Engine` against embedding cache
+       │
+       ▼ (Prompt Injection)
+[ GROQ LLM & VISION (Llama 4 Scout) ]
+       │
+       ├─► Evaluates strict World Knowledge constraints & Contextual Logic
+       ├─► Zero-Latency Mode Router (Emits [MODE_SWITCH:] tags)
+       ├─► Delta-Awareness (Emits [SCENE_UNCHANGED] if static)
+       │
+       ▼ (Streaming Text Response)
+[ FLUTTER FUSION ENGINE ]
+       │
+       ├─► Catches tags (Switches UI mode instantly)
+       ├─► Triggers Native TTS (Speaks aloud)
+       ├─► Ambient Reassurance (Handles dead-air silence)
+       │
+       ▼
+[ USER FEEDBACK (Audio/Haptic) ]
 ```
+
+## 📅 Recent Updates & Changelog
+
+### 🧠 Intelligence & Context
+- **World Knowledge Integration**: The AI no longer just reads raw text or lists objects. It applies contextual intelligence (e.g., explaining the dosage instructions on a pill bottle label or warning if a cup is on a table edge).
+- **Zero-Latency Intent Routing**: The AI can now seamlessly switch modes mid-conversation using `[MODE_SWITCH:]` tags based on user intent (e.g., automatically switching to 'Navigate' if the user asks for directions).
+- **Backend Reverse Geocoding**: Removed buggy on-device geocoding plugins. Location is now handled entirely via the backend (OpenStreetMap), converting raw coordinates into human-readable contexts. Raw GPS numbers are strictly filtered out of the AI's TTS responses.
+
+### 🔇 Eliminating Silence & Noise
+- **Continuous Background Listening**: The microphone loop now restarts automatically, creating a hands-free, always-on experience.
+- **Intelligent Noise Filter**: Implemented local volume-threshold filtering to drop background noise and static before it reaches the cloud, preventing API rate-limit exhaustion.
+- **Ambient Reassurance**: In continuous scanning modes (like `Surroundings`), if the AI detects no changes, it will gently reassure the user periodically (e.g., "Everything looks the same") rather than abandoning them in terrifying silence.
+
+### 🛡️ Safety & Stability
+- **Native Android SOS**: Background SMS routing is now handled by a custom `MethodChannel` directly to Android Native APIs, bypassing deprecated Flutter plugins to ensure reliable delivery even when the screen is locked.
+- **Sub-Second Mode Switching**: Hardcoded 3-4 second delays between mode switches were removed. Transitions are now near-instantaneous (<200ms).
 
 ## 🚀 Quick Start
 
@@ -49,14 +89,6 @@ source venv/bin/activate  # Linux/Mac
 
 # Install dependencies
 pip install -r requirements.txt
-
-# Optional: For the Face Identity Engine, install face_recognition and numpy
-# (Note: requires CMake and C++ build tools installed on your system)
-# pip install CMake face_recognition numpy
-
-# Configure API keys
-# Create or edit backend/.env and supply your GROQ_API_KEY
-# Optional: add GOOGLE_MAPS_API_KEY for turn-by-turn walking routes
 
 # Start server
 python main.py
@@ -81,15 +113,9 @@ Copy the exported `yolov8n_float16.tflite` directly to `assets/models/yolov8n_fl
 ### 3. Flutter App Setup
 
 ```bash
-# Get dependencies
 flutter pub get
-
-# Run on connected device
 flutter run
 ```
-
-### 4. Setting the Target Connection
-The updated Socket Service includes **auto-discovery**. If the app fails to reach a stale loopback like `10.0.2.2`, it will auto-detect and default to `127.0.0.1:8000` over your ADB reverse tunnel, or optionally the PC's local WiFi IP if untethered.
 
 ## 📱 Operating Modes
 
@@ -100,8 +126,7 @@ EchoSight utilizes multiple distinct sensory states via the Fusion Engine:
 4. **Navigate Mode** — Spatial navigation that utilizes GPS, route step instructions, and visual obstacle tracking to ensure safety while walking outdoors.
 5. **Reader Mode** — Focused specifically on detecting and reading document and signage text aloud seamlessly.
 6. **Identify Mode** — Fast, detailed object descriptions utilizing both local fast detection and cloud vision querying.
-7. **Emergency Mode** — Instant hardware override. Emits an SOS routine while forcing the Groq vision engine to drop conversational pleasantries and solely report immediate critical dangers / structural drop-offs in two sentences or less.
+7. **Emergency Mode** — Instant hardware override. Emits an SOS routine while forcing the Groq vision engine to drop conversational pleasantries and solely report immediate critical dangers.
 
 ## 📄 License
-
 MIT License

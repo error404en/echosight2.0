@@ -47,6 +47,7 @@ class FusionEngine extends ChangeNotifier {
   Timer? _stateTimeoutTimer;
   Timer? _speakingWatchdog;
   DateTime _lastVoiceInputTime = DateTime.fromMillisecondsSinceEpoch(0);
+  int _unchangedCounter = 0;
 
 
   // Callback for screen navigation (set by HomeScreen)
@@ -90,7 +91,7 @@ class FusionEngine extends ChangeNotifier {
   static bool _isProactiveMode(AssistantMode m) =>
       m == AssistantMode.surroundings || m == AssistantMode.sight || m == AssistantMode.auto;
 
-  void setMode(AssistantMode newMode) {
+  void setMode(AssistantMode newMode, {bool announce = true}) {
     if (_currentMode == newMode) return;
 
     final wasProactive = _isProactiveMode(_currentMode);
@@ -127,17 +128,17 @@ class FusionEngine extends ChangeNotifier {
 
     // For navigate and emergency, trigger screen navigation
     if (newMode == AssistantMode.navigate) {
-      ttsService.speak('${newMode.name} mode. ${newMode.description}. Say your destination.');
+      if (announce) ttsService.speak('${newMode.name} mode. ${newMode.description}. Say your destination.');
       onNavigateToScreen?.call('navigate');
       return;
     }
     if (newMode == AssistantMode.emergency) {
-      ttsService.speak('${newMode.name} mode. ${newMode.description}.');
+      if (announce) ttsService.speak('${newMode.name} mode. ${newMode.description}.');
       onNavigateToScreen?.call('emergency');
       return;
     }
 
-    ttsService.speak('${newMode.name} mode. ${newMode.description}.');
+    if (announce) ttsService.speak('${newMode.name} mode. ${newMode.description}.');
 
     // Chat mode — just announce and wait for user speech (no camera needed)
     if (newMode == AssistantMode.chat) {
@@ -146,14 +147,14 @@ class FusionEngine extends ChangeNotifier {
 
     // Auto-trigger immediate actions for interactive modes
     if (newMode == AssistantMode.reader) {
-      Future.delayed(const Duration(milliseconds: 3000), _handleReadCommand);
+      Future.delayed(const Duration(milliseconds: 200), _handleReadCommand);
     } else if (newMode == AssistantMode.identify) {
-      Future.delayed(const Duration(milliseconds: 3000), () {
+      Future.delayed(const Duration(milliseconds: 200), () {
         _handleVoiceInput(query: "Please identify and describe the objects in front of me in detail.");
       });
     } else if (newMode == AssistantMode.surroundings || newMode == AssistantMode.sight) {
       surroundingsService.activate();
-      Future.delayed(const Duration(milliseconds: 4000), () {
+      Future.delayed(const Duration(milliseconds: 200), () {
         runProactiveSurroundingsScan();
       });
     }
@@ -425,6 +426,11 @@ class FusionEngine extends ChangeNotifier {
         _handleVoiceInput(query: text);
       } else {
         _setState(AssistantState.idle);
+        if (_continuousMode) {
+          Future.delayed(const Duration(milliseconds: 300), () {
+            if (_state == AssistantState.idle) startListening();
+          });
+        }
       }
     };
 
@@ -572,6 +578,22 @@ class FusionEngine extends ChangeNotifier {
     _lastVoiceInputTime = now;
 
     if (query != null && query.isNotEmpty) {
+      final normalized = _normalizeQuery(query);
+      
+      // Intelligence/Noise Filter:
+      // Drop single letters, sighs, or pure filler words that result in empty/tiny queries
+      // to avoid rate limits and battery drain during Continuous Listening.
+      if (normalized.length < 2) {
+        debugPrint('🧠 Filtering out background noise/useless data: "$query"');
+        _setState(AssistantState.idle);
+        if (_continuousMode) {
+          Future.delayed(const Duration(milliseconds: 300), () {
+            if (_state == AssistantState.idle) startListening();
+          });
+        }
+        return;
+      }
+
       if (_tryGlobalVoiceCommand(query)) {
         _setState(AssistantState.idle);
         return;
@@ -729,6 +751,30 @@ class FusionEngine extends ChangeNotifier {
       return;
     }
 
+    if (chunk.startsWith('[COMMAND_SWITCH_MODE:')) {
+      final tagEnd = chunk.indexOf(']');
+      if (tagEnd != -1) {
+        final modeStr = chunk.substring(21, tagEnd).trim().toLowerCase();
+        AssistantMode? newMode;
+        switch (modeStr) {
+          case 'navigate': newMode = AssistantMode.navigate; break;
+          case 'emergency': newMode = AssistantMode.emergency; break;
+          case 'reader': newMode = AssistantMode.reader; break;
+          case 'surroundings': newMode = AssistantMode.surroundings; break;
+          case 'sight': newMode = AssistantMode.sight; break;
+          case 'identify': newMode = AssistantMode.identify; break;
+          case 'chat': newMode = AssistantMode.chat; break;
+          case 'assistant': newMode = AssistantMode.assistant; break;
+          case 'auto': newMode = AssistantMode.auto; break;
+        }
+        if (newMode != null && newMode != _currentMode) {
+          debugPrint('🧠 AI Intent Router: Auto-switching to $newMode');
+          setMode(newMode, announce: false);
+        }
+      }
+      return;
+    }
+
     if (chunk == '[RATE_LIMIT]') {
       _streamingResponse = 'API quota reached. Please wait a moment.';
       _addMessage(ChatMessage(
@@ -784,7 +830,13 @@ class FusionEngine extends ChangeNotifier {
       _streamingResponse = '';
       _sceneUnchangedSkipDone = true;
       _setState(AssistantState.idle);
-      debugPrint('👁️ Surroundings: No changes detected');
+      _unchangedCounter++;
+      // Every 3rd unchanged scan, give a gentle ambient reassurance
+      // so the user never feels abandoned in silence
+      if (_unchangedCounter % 3 == 0) {
+        ttsService.speak("Everything looks the same around you, you're good.");
+      }
+      debugPrint('👁️ Surroundings: No changes detected ($_unchangedCounter)');
       return;
     }
 

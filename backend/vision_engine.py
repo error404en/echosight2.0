@@ -73,14 +73,11 @@ def _build_context_parts(
                 context_parts.append("Navigation: " + "; ".join(nav_parts))
 
     if location_data:
-        lat = location_data.get("latitude", 0.0)
-        lon = location_data.get("longitude", 0.0)
-        heading = location_data.get("heading", 0.0)
         speed = location_data.get("speed", 0.0)
-        context_parts.append(
-            "GPS Data: "
-            f"Lat {lat:.5f}, Lon {lon:.5f}, Heading {heading:.1f}deg, Speed {speed:.1f}m/s"
-        )
+        heading = location_data.get("heading", 0.0)
+        # Only provide human-relevant motion context, NEVER raw coordinates
+        if speed > 0.3:
+            context_parts.append(f"User appears to be moving at about {speed:.1f} meters per second.")
 
     return context_parts
 

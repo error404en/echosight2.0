@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:vibration/vibration.dart';
 import 'camera_service.dart';
 import 'tts_service.dart';
@@ -13,6 +14,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:record/record.dart';
 import 'package:path_provider/path_provider.dart';
 import 'vision_context_builder.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 /// Emergency state for the UI.
 enum EmergencyState {
@@ -242,6 +244,8 @@ class EmergencyService extends ChangeNotifier {
     });
   }
 
+  static const _platform = MethodChannel('com.echosight.echosight/sms');
+
   Future<void> _sendEmergencySMS() async {
     if (_emergencyContacts.isEmpty) {
       if (!isCountingDown) { 
@@ -267,17 +271,23 @@ class EmergencyService extends ChangeNotifier {
     _lastAlert = 'SOS Message sent to ${_emergencyContacts.length} contacts.';
     ttsService.speak(_lastAlert);
     
-    final phones = _emergencyContacts.map((c) => c['phone']!).join(',');
-    final uri = Uri.parse('sms:$phones?body=${Uri.encodeComponent(sosMessage)}');
-    
-    try {
-      if (await canLaunchUrl(uri)) {
-        await launchUrl(uri);
-      } else {
-        ttsService.speak('Could not open SMS app to send alert.');
+    // Request permission to send SMS in background
+    if (await Permission.sms.request().isGranted) {
+      try {
+        // Send SMS to all contacts sequentially
+        for (var contact in _emergencyContacts) {
+          final phone = contact['phone']!;
+          await _platform.invokeMethod('sendSms', {
+            'phone': phone,
+            'message': sosMessage,
+          });
+        }
+      } catch (e) {
+        debugPrint('❌ Failed to send background SMS via channel: $e');
+        ttsService.speak('Failed to send text messages in the background.');
       }
-    } catch (e) {
-      debugPrint('❌ Failed to launch SMS: $e');
+    } else {
+      ttsService.speak('Permission to send SMS automatically was denied.');
     }
   }
 

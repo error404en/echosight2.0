@@ -1,6 +1,5 @@
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:geocoding/geocoding.dart';
 
 /// Service to fetch GPS coordinates and physical address for Emergency and Navigation protocols.
 class LocationService extends ChangeNotifier {
@@ -41,31 +40,30 @@ class LocationService extends ChangeNotifier {
     }
   }
 
-  /// Get current precise location and address
+  /// Get current location coordinates
   Future<Map<String, dynamic>?> getCurrentLocation() async {
     if (!_isAvailable) return null;
     try {
-      Position position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high
-      );
-      
-      String address = '';
+      Position? position;
       try {
-        List<Placemark> placemarks = await placemarkFromCoordinates(position.latitude, position.longitude);
-        if (placemarks.isNotEmpty) {
-          final p = placemarks.first;
-          address = '${p.street}, ${p.locality}, ${p.postalCode}'.replaceAll(RegExp(r'^, |, $'), '').trim();
-        }
-      } catch (e) {
-        debugPrint('❌ Reverse Geocoding failed: $e');
+        // Use medium accuracy for much faster locks (less than 1 second)
+        position = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.medium,
+        ).timeout(const Duration(seconds: 2));
+      } catch (_) {
+        // Fallback to last known if current times out
+        position = await Geolocator.getLastKnownPosition();
       }
-
+      
+      if (position == null) {
+        return null;
+      }
+      
       return {
         'latitude': position.latitude,
         'longitude': position.longitude,
-        'heading': position.heading, // Useful for Walk Assist
+        'heading': position.heading,
         'speed': position.speed,
-        'address': address,
       };
     } catch (e) {
       debugPrint('❌ Failed to get location: $e');
